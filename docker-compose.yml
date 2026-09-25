@@ -1,0 +1,164 @@
+name: bnpb-platform
+
+# Semua nilai rahasia diambil dari .env (lihat .env.example).
+# Tiap service hanya menerima variabel yang memang ia butuhkan, supaya
+# kredensial satu domain tidak bocor ke container domain lain.
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  environment: &common-env
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  # ---------------------------------------------------------------- sources
+  bmkg-mock:
+    <<: *service-defaults
+    build: ./services/bmkg-mock
+    environment:
+      <<: *common-env
+      BMKG_API_KEY: ${BMKG_API_KEY:?set BMKG_API_KEY in .env}
+      RESPONSE_DELAY_MS: ${BMKG_RESPONSE_DELAY_MS:-100}
+      NEW_EVENT_INTERVAL_SECONDS: ${BMKG_NEW_EVENT_INTERVAL_SECONDS:-10}
+    ports:
+      - "${BMKG_PORT:-8081}:8081"
+    networks: [backend]
+
+  pvmbg-mock:
+    <<: *service-defaults
+    build: ./services/pvmbg-mock
+    environment:
+      <<: *common-env
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?set PVMBG_TOKEN in .env}
+      RESPONSE_DELAY_MIN_MS: ${PVMBG_RESPONSE_DELAY_MIN_MS:-500}
+      RESPONSE_DELAY_MAX_MS: ${PVMBG_RESPONSE_DELAY_MAX_MS:-3000}
+      NEW_EVENT_INTERVAL_SECONDS: ${PVMBG_NEW_EVENT_INTERVAL_SECONDS:-10}
+    ports:
+      - "${PVMBG_PORT:-8082}:8082"
+    networks: [backend]
+
+  # ------------------------------------------------------------------- BNPB
+  bnpb-aggregator:
+    <<: *service-defaults
+    build: ./services/bnpb-aggregator
+    environment:
+      <<: *common-env
+      BMKG_BASE_URL: http://bmkg-mock:8081
+      BMKG_API_KEY: ${BMKG_API_KEY:?set BMKG_API_KEY in .env}
+      PVMBG_BASE_URL: http://pvmbg-mock:8082
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?set PVMBG_TOKEN in .env}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-3}
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:?}:${MONGO_ROOT_PASSWORD:?}@mongo:27017/?authSource=admin
+      MONGO_DB: ${MONGO_DB:-bnpb}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+    depends_on:
+      mongo: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    # Tidak di-publish ke host: hanya diakses service lain via jaringan internal.
+    networks: [backend, store]
+
+  bnpb-auth:
+    <<: *service-defaults
+    build: ./services/bnpb-auth
+    environment:
+      <<: *common-env
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY in .env}
+      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-60}
+      REFRESH_TOKEN_TTL_SECONDS: ${REFRESH_TOKEN_TTL_SECONDS:-3600}
+      CLIENT_MEDIA_ID: ${CLIENT_MEDIA_ID:?}
+      CLIENT_MEDIA_SECRET: ${CLIENT_MEDIA_SECRET:?}
+      CLIENT_FIELD_ID: ${CLIENT_FIELD_ID:?}
+      CLIENT_FIELD_SECRET: ${CLIENT_FIELD_SECRET:?}
+      CLIENT_OPS_ID: ${CLIENT_OPS_ID:?}
+      CLIENT_OPS_SECRET: ${CLIENT_OPS_SECRET:?}
+    ports:
+      - "${AUTH_PORT:-8090}:8000"
+    networks: [backend]
+
+  bnpb-api:
+    <<: *service-defaults
+    build: ./services/bnpb-api
+    environment:
+      <<: *common-env
+      AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+      AUTH_BASE_URL: http://bnpb-auth:8000
+    ports:
+      - "${API_PORT:-8080}:8080"
+    networks: [backend]
+
+  bnpb-consumer-dashboard:
+    <<: *service-defaults
+    build: ./services/bnpb-consumer-dashboard
+    environment:
+      <<: *common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_GROUP_ID: dashboard-updater
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [backend]
+
+  bnpb-consumer-notifier:
+    <<: *service-defaults
+    build: ./services/bnpb-consumer-notifier
+    environment:
+      <<: *common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_GROUP_ID: notifier
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [backend]
+
+  # ---------------------------------------------------------- infrastructure
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:?set MONGO_ROOT_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Hanya berada di jaringan `store` -> hanya bnpb-aggregator yang bisa menjangkaunya.
+    networks: [store]
+
+  kafka:
+    image: apache/kafka:3.9.0
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks: [backend]
+
+networks:
+  backend:
+  store:
+    internal: true
+
+volumes:
+  mongo-data:
+  kafka-data:

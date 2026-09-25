@@ -1,0 +1,18 @@
+# secrets
+.env
+*.pem
+*.key
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# load test output
+loadtest/results/

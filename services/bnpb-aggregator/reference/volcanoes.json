@@ -1,0 +1,10 @@
+{
+  "_note": "Tabel referensi statis milik BNPB. volcano_id WAJIB sama dengan yang dipakai pvmbg-mock.",
+  "volcanoes": {
+    "MERAPI":   { "name": "Gunung Merapi",   "latitude": -7.5407, "longitude": 110.4457 },
+    "SEMERU":   { "name": "Gunung Semeru",   "latitude": -8.1077, "longitude": 112.9224 },
+    "SINABUNG": { "name": "Gunung Sinabung", "latitude":  3.1700, "longitude": 98.3920 },
+    "KRAKATAU": { "name": "Anak Krakatau",   "latitude": -6.1020, "longitude": 105.4230 },
+    "LEWOTOBI": { "name": "Lewotobi Laki-laki", "latitude": -8.5420, "longitude": 122.7750 }
+  }
+}
