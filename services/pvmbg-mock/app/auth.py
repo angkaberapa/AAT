@@ -1,9 +1,17 @@
 from secrets import compare_digest
 from typing import Annotated
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
+
+bearer_scheme = HTTPBearer(
+    bearerFormat="opaque PVMBG token",
+    scheme_name="PVMBGBearer",
+    description="PVMBG service credential supplied through Authorization: Bearer <token>",
+    auto_error=False,
+)
 
 
 def unauthorized(detail: str) -> HTTPException:
@@ -17,18 +25,19 @@ def unauthorized(detail: str) -> HTTPException:
 
 async def require_pvmbg_token(
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(bearer_scheme),
+    ],
 ) -> None:
     """Require the configured PVMBG Bearer token for a protected endpoint"""
-    if authorization is None:
+    if credentials is None:
         raise unauthorized("Authorization Bearer token is required")
-
-    parts = authorization.strip().split(maxsplit=1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+    if credentials.scheme.lower() != "bearer" or not credentials.credentials.strip():
         raise unauthorized("Authorization header must use the Bearer scheme")
 
     settings: Settings = request.app.state.settings
-    provided_token = parts[1].strip()
+    provided_token = credentials.credentials.strip()
     expected_token = settings.pvmbg_token.get_secret_value()
 
     if not compare_digest(provided_token, expected_token):

@@ -110,3 +110,14 @@ async def test_health_remains_public() -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
+
+
+def test_openapi_declares_http_bearer_security_scheme() -> None:
+    schema = create_app().openapi()
+
+    security_scheme = schema["components"]["securitySchemes"]["PVMBGBearer"]
+    reports_operation = schema["paths"]["/volcanic-reports"]["get"]
+
+    assert security_scheme["type"] == "http"
+    assert security_scheme["scheme"] == "bearer"
+    assert reports_operation["security"] == [{"PVMBGBearer": []}]

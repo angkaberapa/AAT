@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from .config import get_settings
 from .routes.health import router as health_router
+from .routes.reports import router as reports_router
 from .state import RuntimeState
 
 
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.include_router(health_router)
+    application.include_router(reports_router)
     return application
 
 
