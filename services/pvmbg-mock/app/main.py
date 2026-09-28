@@ -4,12 +4,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import get_settings
+from .state import RuntimeState
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Validate configuration before the service starts accepting requests"""
     app.state.settings = get_settings()
+    app.state.runtime = RuntimeState.seeded()
     yield
 
 
