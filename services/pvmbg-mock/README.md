@@ -60,7 +60,11 @@ The service reads configuration from environment variables and exits during star
 | `PVMBG_TOKEN` | yes | - | Must not be empty or whitespace-only |
 | `RESPONSE_DELAY_MIN_MS` | no | `500` | Integer greater than or equal to zero |
 | `RESPONSE_DELAY_MAX_MS` | no | `3000` | Integer greater than or equal to the minimum |
-| `NEW_EVENT_INTERVAL_SECONDS` | no | `10` | Positive integer |
+| `NEW_EVENT_INTERVAL_SECONDS` | no | `10` | Integer from `1` through `10` |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
 
 The token is represented as a Pydantic secret so its value is masked in model representations.
+
+The service generates one new volcanic report after every configured event interval. Every HTTP
+response includes `X-Correlation-ID`; request, generator, and admin state-change events are emitted
+as one-line JSON logs to stdout.

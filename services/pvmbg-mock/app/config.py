@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     new_event_interval_seconds: int = Field(
         default=10,
         gt=0,
+        le=10,
         validation_alias="NEW_EVENT_INTERVAL_SECONDS",
     )
     log_level: LogLevel = Field(default="INFO", validation_alias="LOG_LEVEL")

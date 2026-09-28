@@ -92,6 +92,16 @@ def test_event_interval_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> Non
         load_settings_from_environment()
 
 
+def test_event_interval_cannot_exceed_ten_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PVMBG_TOKEN", "test-token")
+    monkeypatch.setenv("NEW_EVENT_INTERVAL_SECONDS", "11")
+
+    with pytest.raises(ValidationError):
+        load_settings_from_environment()
+
+
 def test_log_level_must_be_known(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PVMBG_TOKEN", "test-token")
     monkeypatch.setenv("LOG_LEVEL", "verbose")
