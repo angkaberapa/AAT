@@ -54,6 +54,8 @@ class RuntimeState:
         self._schema_version: SchemaVersion = 1
         self._outage_enabled = False
         self._outage_mode = OutageMode.ERROR
+        self._outage_cleared = asyncio.Event()
+        self._outage_cleared.set()
         self._next_report_sequence = next_report_sequence
         self._lock = asyncio.Lock()
 
@@ -116,3 +118,11 @@ class RuntimeState:
         async with self._lock:
             self._outage_enabled = enabled
             self._outage_mode = mode
+            if enabled:
+                self._outage_cleared.clear()
+            else:
+                self._outage_cleared.set()
+
+    async def wait_until_outage_clears(self) -> None:
+        """Wait without blocking the event loop until the service recovers"""
+        await self._outage_cleared.wait()

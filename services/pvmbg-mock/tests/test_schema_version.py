@@ -13,6 +13,8 @@ AUTHORIZATION = {"Authorization": "Bearer pvmbg.v1.test-secret"}
 def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Provide an isolated credential and settings cache for every endpoint test"""
     monkeypatch.setenv("PVMBG_TOKEN", "pvmbg.v1.test-secret")
+    monkeypatch.setenv("RESPONSE_DELAY_MIN_MS", "0")
+    monkeypatch.setenv("RESPONSE_DELAY_MAX_MS", "0")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
