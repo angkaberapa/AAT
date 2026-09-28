@@ -1,13 +1,29 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from zlib import crc32
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..auth import require_pvmbg_token
-from ..models import VolcanicReportsResponse
+from ..models import SchemaVersion, VolcanicReport, VolcanicReportsResponse
 from ..state import RuntimeState
 
 router = APIRouter(tags=["volcanic reports"])
+
+
+def project_report_for_schema(
+    report: VolcanicReport,
+    schema_version: SchemaVersion,
+) -> VolcanicReport:
+    """Project one stored report into the currently active response schema"""
+    if schema_version == 1:
+        return report.model_copy(update={"confidence_level": None})
+    if report.confidence_level is not None:
+        return report
+
+    confidence_bucket = crc32(report.report_id.encode("utf-8")) % 5000
+    confidence_level = round(0.5 + confidence_bucket / 10_000, 4)
+    return report.model_copy(update={"confidence_level": confidence_level})
 
 
 def parse_since(
@@ -60,4 +76,6 @@ async def list_volcanic_reports(
     """Return all reports newer than the optional exclusive UTC timestamp"""
     runtime: RuntimeState = request.app.state.runtime
     reports = await runtime.list_reports(since)
-    return VolcanicReportsResponse(data=reports)
+    schema_version = await runtime.get_schema_version()
+    projected_reports = [project_report_for_schema(report, schema_version) for report in reports]
+    return VolcanicReportsResponse(data=projected_reports)
