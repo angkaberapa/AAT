@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import get_settings
+from .routes.health import router as health_router
 from .state import RuntimeState
 
 
@@ -17,12 +18,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """Create the FastAPI application"""
-    return FastAPI(
+    application = FastAPI(
         title="PVMBG Mock Service",
         description="Mock PVMBG service for the IF4031 distributed application project.",
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.include_router(health_router)
+    return application
 
 
 app = create_app()
