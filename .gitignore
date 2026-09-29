@@ -9,6 +9,18 @@ bin/
 coverage.out
 go.work.sum
 
+# python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
 # editors / OS
 .vscode/
 .idea/
