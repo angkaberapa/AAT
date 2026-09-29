@@ -3,11 +3,11 @@
 *.pem
 *.key
 
-# node
-node_modules/
-dist/
-*.tsbuildinfo
-npm-debug.log*
+# go
+bin/
+*.test
+coverage.out
+go.work.sum
 
 # editors / OS
 .vscode/

@@ -91,43 +91,46 @@ Berlaku untuk semua service (Ketentuan Implementasi no. 7):
 - **Correlation ID**: header `X-Correlation-ID`. Diterima dari request masuk (atau dibuat
   baru), disimpan di context, ikut tercetak di setiap log, dan diteruskan ke setiap panggilan
   keluar. Untuk alur tanpa request masuk (mis. satu siklus polling), buat ID baru per siklus.
-- **Latensi panggilan keluar**: gunakan `createHttpClient(logger)` dari `src/core/http.ts`,
-  jangan panggil `fetch` langsung, supaya latensi dan status tiap panggilan tercatat.
-- **Background job** (polling, consumer Kafka): bungkus tiap siklus/event dengan
-  `withCorrelationId(newCorrelationId(), () => ...)` dari `src/core/context.ts`.
+- **Latensi panggilan keluar**: gunakan `core.NewHTTPClient(...)` (`internal/core/httpclient.go`),
+  jangan `http.DefaultClient`, supaya correlation ID ikut terkirim dan latensi tiap panggilan tercatat.
+- **Background job** (polling, consumer Kafka): buat context baru per siklus/event dengan
+  `core.WithCorrelationID(ctx, core.NewCorrelationID())`, lalu log dengan varian `...Context`
+  (`logger.InfoContext(ctx, ...)`) supaya `correlation_id` ikut tercetak.
 
 Tiap service boleh memakai bahasa/framework berbeda; yang mengikat hanya kontrak jaringan.
 Service mock menjelaskan kewajibannya di `CONTRACT.md` masing-masing.
 
-Folder `src/core/` (context, logger, server, http) sengaja **disalin** ke setiap service BNPB,
-bukan dibagikan sebagai library, sesuai larangan berbagi library lintas service. Isinya tidak
-mengandung business logic. Kalau diubah, samakan di semua service.
+Paket `internal/core/` (correlation ID, logger, server + `/health`, HTTP client, pembaca env)
+sengaja **disalin** ke setiap service BNPB, bukan dibagikan sebagai library, sesuai larangan
+berbagi library lintas service. Isinya tidak mengandung business logic. Kalau diubah, samakan
+di semua service.
 
 ## Stack BNPB
 
 | Kebutuhan | Pilihan |
 |---|---|
-| Runtime / bahasa | Node.js 24 + TypeScript 6 (ESM) |
-| HTTP server | Fastify 5 |
-| Logging | pino (JSON) + `AsyncLocalStorage` untuk correlation ID |
-| Validasi config | zod |
-| HTTP client | `fetch` bawaan Node |
-| MongoDB | driver resmi `mongodb` |
-| Kafka | `@confluentinc/kafka-javascript` (API kompatibel KafkaJS; KafkaJS sendiri sudah tidak dirawat) |
-| JWT | `jose` |
+| Bahasa | Go (`go 1.24` di `go.mod`; image build memakai Go 1.27) |
+| HTTP server & client | `net/http` bawaan |
+| Logging | `log/slog` bawaan (JSON), correlation ID lewat `context.Context` |
+| Config | `os` bawaan + `core.Env` (semua error dilaporkan sekaligus, lalu exit) |
+| Image runtime | `distroless/static:nonroot` (±16 MB, tanpa shell; health check via `/app healthcheck`) |
+
+Base saat ini **hanya memakai standard library**. Library yang direncanakan saat problem terkait
+dikerjakan: MongoDB → `go.mongodb.org/mongo-driver/v2`, Kafka → `github.com/twmb/franz-go`
+(Go murni, tanpa cgo), JWT → `github.com/golang-jwt/jwt/v5` (+ JWKS), rate limit →
+`golang.org/x/time/rate`.
 
 Pengembangan lokal satu service (tanpa Docker):
 
 ```bash
 cd services/bnpb-api
-npm install
-npm run dev        # tsx watch; set env yang dibutuhkan (lihat src/config.ts)
-npm run typecheck
+go run .           # set env yang dibutuhkan (lihat internal/config/config.go)
+go vet ./...
+go test ./...
 ```
 
-Catatan npm 11: install script diblokir secara default. `@confluentinc/kafka-javascript` sudah
-di-approve di `package.json` (`allowScripts`). Kalau versinya di-upgrade, jalankan ulang
-`npm approve-scripts @confluentinc/kafka-javascript`.
+`go.work` di root menggabungkan kelima modul supaya editor (gopls) bisa dibuka dari root repo.
+Tiap service tetap modul Go tersendiri dan di-build terpisah oleh Docker.
 
 ## Struktur repo
 
@@ -135,24 +138,24 @@ di-approve di `package.json` (`allowScripts`). Kalau versinya di-upgrade, jalank
 .
 ├── docker-compose.yml
 ├── .env.example
-├── docs/                    # diagram & bahan laporan
+├── go.work                  # workspace untuk editor; tidak dipakai Docker
+├── docs/                    # backlog, diagram & bahan laporan
 ├── loadtest/                # skrip load test (P2)
 ├── scripts/                 # skrip demo tiap skenario
 └── services/
     ├── bmkg-mock/           # tech bebas, lihat CONTRACT.md
     ├── pvmbg-mock/          # tech bebas, lihat CONTRACT.md
-    └── bnpb-*/              # TypeScript + Fastify
-        ├── Dockerfile       # multi-stage: build tsc -> image produksi
-        ├── package.json
-        ├── tsconfig.json
-        └── src/
-            ├── main.ts      # entrypoint
-            ├── config.ts    # env -> config tervalidasi (zod)
-            └── core/        # context (correlation ID), logger, server (+/health), http
+    └── bnpb-*/              # Go
+        ├── Dockerfile       # multi-stage: go build -> distroless
+        ├── go.mod
+        ├── main.go          # entrypoint
+        └── internal/
+            ├── config/      # env -> Config tervalidasi
+            └── core/        # correlation ID, logger, server (+/health), HTTP client, env
 ```
 
-`bnpb-aggregator` juga punya `src/ingest/`, `src/mapping/`, `src/store/`, `src/publisher/`,
-`src/api/`, dan `reference/volcanoes.json` (tabel referensi gunung api milik BNPB).
+`bnpb-aggregator/internal` juga punya `ingest/`, `mapping/`, `store/`, `publisher/`, `api/`, dan
+`reference/` (tabel gunung api milik BNPB, di-embed ke binary lewat `go:embed`).
 
 ## Skenario pengujian
 

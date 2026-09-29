@@ -1,23 +1,14 @@
-FROM node:24-slim AS build
-WORKDIR /srv
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .
 
-FROM node:24-slim
-ENV NODE_ENV=production \
-    PORT=8000
-WORKDIR /srv
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-COPY --from=build /srv/dist ./dist
-COPY reference ./reference
-USER node
+FROM gcr.io/distroless/static-debian12:nonroot
+ENV PORT=8000
+COPY --from=build /out/app /app
 EXPOSE 8000
-
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://localhost:'+process.env.PORT+'/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
-
-CMD ["node", "--enable-source-maps", "dist/main.js"]
+USER nonroot
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["/app", "healthcheck"]
+ENTRYPOINT ["/app"]

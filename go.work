@@ -1,0 +1,9 @@
+go 1.24
+
+use (
+	./services/bnpb-aggregator
+	./services/bnpb-api
+	./services/bnpb-auth
+	./services/bnpb-consumer-dashboard
+	./services/bnpb-consumer-notifier
+)
