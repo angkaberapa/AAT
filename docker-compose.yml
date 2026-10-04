@@ -63,6 +63,8 @@ services:
     environment:
       <<: *common-env
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY in .env}
+      JWT_ISSUER: ${JWT_ISSUER:-bnpb-auth}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-bnpb-api}
       ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-60}
       REFRESH_TOKEN_TTL_SECONDS: ${REFRESH_TOKEN_TTL_SECONDS:-3600}
       CLIENT_MEDIA_ID: ${CLIENT_MEDIA_ID:?}
@@ -82,6 +84,9 @@ services:
       <<: *common-env
       AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
       AUTH_BASE_URL: http://bnpb-auth:8000
+      JWT_ISSUER: ${JWT_ISSUER:-bnpb-auth}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-bnpb-api}
+      JWKS_CACHE_TTL_SECONDS: ${JWKS_CACHE_TTL_SECONDS:-300}
     ports:
       - "${API_PORT:-8080}:8080"
     networks: [backend]
