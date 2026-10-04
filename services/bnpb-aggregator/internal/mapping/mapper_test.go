@@ -38,7 +38,7 @@ func TestMapVolcanicReportSupportsSchemaV1AndV2(t *testing.T) {
 		"eruption_count_24h":7,
 		"ash_column_height_m":1500.0,
 		"reported_at":"2026-10-03T08:00:00Z",
-		"future_additive_field":{"ignored":true}
+		"future_additive_field":{"preserved":true}
 	}`), &versionOne); err != nil {
 		t.Fatalf("decode schema v1: %v", err)
 	}
@@ -61,6 +61,10 @@ func TestMapVolcanicReportSupportsSchemaV1AndV2(t *testing.T) {
 	}
 	if got := mappedV2.Attributes["confidence_level"]; got != confidence {
 		t.Fatalf("schema v2 confidence_level = %v, want %v", got, confidence)
+	}
+	future, exists := mappedV1.Attributes["future_additive_field"].(map[string]any)
+	if !exists || future["preserved"] != true {
+		t.Fatalf("unknown additive field was not forwarded: %#v", mappedV1.Attributes["future_additive_field"])
 	}
 	if mappedV1.HazardID != mappedV2.HazardID {
 		t.Fatalf("schema evolution changed stable hazard ID: %q != %q", mappedV1.HazardID, mappedV2.HazardID)
@@ -130,6 +134,7 @@ func TestTsunamiWarningOverridesMagnitudeSeverity(t *testing.T) {
 			AffectedZones:    []string{"Banten"},
 			EstimatedArrival: fixedOccurred.Add(20 * time.Minute),
 			IssuedAt:         fixedOccurred.Add(time.Minute),
+			AdditionalFields: map[string]any{"bulletin_source": "sensor-network-a"},
 		},
 	)
 	if err != nil {
@@ -140,6 +145,10 @@ func TestTsunamiWarningOverridesMagnitudeSeverity(t *testing.T) {
 	}
 	if _, exists := event.Attributes["tsunami_warning"]; !exists {
 		t.Fatal("mapped event does not contain tsunami warning attributes")
+	}
+	warningAttributes := event.Attributes["tsunami_warning"].(map[string]any)
+	if warningAttributes["bulletin_source"] != "sensor-network-a" {
+		t.Fatalf("unknown warning field was not forwarded: %#v", warningAttributes)
 	}
 }
 

@@ -41,11 +41,10 @@ func (mapper *Mapper) MapSeismicEvent(
 	}
 
 	severity := severityFromMagnitude(event.Magnitude)
-	attributes := map[string]any{
-		"magnitude":         event.Magnitude,
-		"depth_km":          event.DepthKM,
-		"potential_tsunami": event.PotentialTsunami,
-	}
+	attributes := copyAttributes(event.AdditionalFields)
+	attributes["magnitude"] = event.Magnitude
+	attributes["depth_km"] = event.DepthKM
+	attributes["potential_tsunami"] = event.PotentialTsunami
 	if warning != nil {
 		if warning.RelatedEventID != event.EventID {
 			return domain.HazardEvent{}, fmt.Errorf(
@@ -60,13 +59,13 @@ func (mapper *Mapper) MapSeismicEvent(
 		if err != nil {
 			return domain.HazardEvent{}, err
 		}
-		attributes["tsunami_warning"] = map[string]any{
-			"warning_id":        warning.WarningID,
-			"threat_level":      warning.ThreatLevel,
-			"affected_zones":    append([]string(nil), warning.AffectedZones...),
-			"estimated_arrival": warning.EstimatedArrival.UTC(),
-			"issued_at":         warning.IssuedAt.UTC(),
-		}
+		warningAttributes := copyAttributes(warning.AdditionalFields)
+		warningAttributes["warning_id"] = warning.WarningID
+		warningAttributes["threat_level"] = warning.ThreatLevel
+		warningAttributes["affected_zones"] = append([]string(nil), warning.AffectedZones...)
+		warningAttributes["estimated_arrival"] = warning.EstimatedArrival.UTC()
+		warningAttributes["issued_at"] = warning.IssuedAt.UTC()
+		attributes["tsunami_warning"] = warningAttributes
 	}
 
 	mapped := domain.HazardEvent{
@@ -98,10 +97,9 @@ func (mapper *Mapper) MapVolcanicReport(report VolcanicReport) (domain.HazardEve
 		return domain.HazardEvent{}, err
 	}
 
-	attributes := map[string]any{
-		"eruption_count_24h":  report.EruptionCount24H,
-		"ash_column_height_m": report.AshColumnHeightM,
-	}
+	attributes := copyAttributes(report.AdditionalFields)
+	attributes["eruption_count_24h"] = report.EruptionCount24H
+	attributes["ash_column_height_m"] = report.AshColumnHeightM
 	if report.ConfidenceLevel != nil {
 		attributes["confidence_level"] = *report.ConfidenceLevel
 	}
@@ -120,6 +118,14 @@ func (mapper *Mapper) MapVolcanicReport(report VolcanicReport) (domain.HazardEve
 		Attributes:  attributes,
 	}
 	return mapped, mapped.Validate()
+}
+
+func copyAttributes(source map[string]any) map[string]any {
+	result := make(map[string]any, len(source)+4)
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 
 func severityFromMagnitude(magnitude float64) domain.Severity {
