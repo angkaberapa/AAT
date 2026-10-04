@@ -9,6 +9,8 @@ import (
 
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/core"
+	"github.com/angkaberapa/AAT/services/bnpb-api/internal/hazards"
+	"github.com/angkaberapa/AAT/services/bnpb-api/internal/security"
 )
 
 func main() {
@@ -27,11 +29,24 @@ func main() {
 	mux := core.NewMux(cfg.ServiceName)
 	// Outbound calls to aggregator/auth must go through this (correlation ID + latency log).
 	httpClient := core.NewHTTPClient(logger, cfg.UpstreamTimeout)
-	_ = httpClient
+	jwks, err := security.NewJWKSProvider(cfg.AuthBaseURL, httpClient, cfg.JWKSCacheTTL)
+	if err != nil {
+		logger.Error("initialize JWKS provider", "error", err)
+		os.Exit(1)
+	}
+	verifier, err := security.NewVerifier(jwks, cfg.JWTIssuer, cfg.JWTAudience)
+	if err != nil {
+		logger.Error("initialize token verifier", "error", err)
+		os.Exit(1)
+	}
+	hazardHandler, err := hazards.NewHandler(cfg.AggregatorBaseURL, httpClient)
+	if err != nil {
+		logger.Error("initialize hazard handler", "error", err)
+		os.Exit(1)
+	}
+	hazardHandler.Register(mux, verifier.Middleware)
 
-	// TODO: read routes (GET /hazards, GET /hazards/{id}) proxied to the aggregator
 	// TODO(P2): rate limiter / concurrency limit, stale-data response on PVMBG outage
-	// TODO(P3): verify JWT, enforce scope-based field filtering (media = Ringkasan only)
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
 		logger.Error("server error", "error", err)
