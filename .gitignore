@@ -9,6 +9,10 @@ bin/
 coverage.out
 go.work.sum
 
+# node
+node_modules/
+dist/
+
 # python
 .venv/
 venv/
