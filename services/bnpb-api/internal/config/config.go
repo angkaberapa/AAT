@@ -16,7 +16,10 @@ type Config struct {
 	// Canonical data is read ONLY through the aggregator's API, never from Mongo.
 	AggregatorBaseURL string
 	// Used to fetch the token verification key from the auth service.
-	AuthBaseURL string
+	AuthBaseURL  string
+	JWTIssuer    string
+	JWTAudience  string
+	JWKSCacheTTL time.Duration
 
 	UpstreamTimeout time.Duration
 }
@@ -30,6 +33,9 @@ func Load() (Config, error) {
 
 		AggregatorBaseURL: e.String("AGGREGATOR_BASE_URL", "http://bnpb-aggregator:8000"),
 		AuthBaseURL:       e.String("AUTH_BASE_URL", "http://bnpb-auth:8000"),
+		JWTIssuer:         e.String("JWT_ISSUER", "bnpb-auth"),
+		JWTAudience:       e.String("JWT_AUDIENCE", "bnpb-api"),
+		JWKSCacheTTL:      e.Seconds("JWKS_CACHE_TTL_SECONDS", 5*time.Minute),
 
 		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 2000*time.Millisecond),
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/angkaberapa/AAT/services/bnpb-auth/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-auth/internal/core"
+	"github.com/angkaberapa/AAT/services/bnpb-auth/internal/token"
 )
 
 func main() {
@@ -25,10 +26,23 @@ func main() {
 	defer stop()
 
 	mux := core.NewMux(cfg.ServiceName)
-
-	// TODO(P3): POST /token (client credentials -> access + refresh token with scope)
-	// TODO(P3): POST /token/refresh (rotate refresh token, reject the old one)
-	// TODO(P3): expose verification key (JWKS) for bnpb-api
+	tokenService, err := token.NewService(token.Config{
+		SigningSecret:  cfg.JWTSigningKey,
+		Issuer:         cfg.JWTIssuer,
+		Audience:       cfg.JWTAudience,
+		AccessTokenTTL: cfg.AccessTokenTTL,
+		RefreshTTL:     cfg.RefreshTokenTTL,
+		Clients: []token.Client{
+			{ID: cfg.ClientMediaID, Secret: cfg.ClientMediaSecret, Scope: token.ScopeHazardsSummary},
+			{ID: cfg.ClientFieldID, Secret: cfg.ClientFieldSecret, Scope: token.ScopeHazardsRead},
+			{ID: cfg.ClientOpsID, Secret: cfg.ClientOpsSecret, Scope: token.ScopeHazardsRead},
+		},
+	})
+	if err != nil {
+		logger.Error("initialize token service", "error", err)
+		os.Exit(1)
+	}
+	token.NewHandler(tokenService).Register(mux)
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
 		logger.Error("server error", "error", err)
