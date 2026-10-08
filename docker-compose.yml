@@ -47,10 +47,16 @@ services:
       PVMBG_BASE_URL: http://pvmbg-mock:8082
       PVMBG_TOKEN: ${PVMBG_TOKEN:?set PVMBG_TOKEN in .env}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-3}
+      UPSTREAM_TIMEOUT_MS: ${UPSTREAM_TIMEOUT_MS:-5000}
+      SOURCE_STALE_AFTER_SECONDS: ${SOURCE_STALE_AFTER_SECONDS:-15}
       MONGO_URI: mongodb://${MONGO_ROOT_USER:?}:${MONGO_ROOT_PASSWORD:?}@mongo:27017/?authSource=admin
       MONGO_DB: ${MONGO_DB:-bnpb}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_TOPIC_PARTITIONS: ${KAFKA_TOPIC_PARTITIONS:-3}
+      KAFKA_TOPIC_RETENTION_HOURS: ${KAFKA_TOPIC_RETENTION_HOURS:-168}
+      OUTBOX_RELAY_INTERVAL_MS: ${OUTBOX_RELAY_INTERVAL_MS:-1000}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
     depends_on:
       mongo: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -87,6 +93,10 @@ services:
       JWT_ISSUER: ${JWT_ISSUER:-bnpb-auth}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-bnpb-api}
       JWKS_CACHE_TTL_SECONDS: ${JWKS_CACHE_TTL_SECONDS:-300}
+      UPSTREAM_TIMEOUT_MS: ${API_UPSTREAM_TIMEOUT_MS:-2000}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-128}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-300}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-600}
     ports:
       - "${API_PORT:-8080}:8080"
     networks: [backend]
@@ -99,6 +109,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
       KAFKA_GROUP_ID: dashboard-updater
+      PROCESSING_DELAY_MS: ${DASHBOARD_PROCESSING_DELAY_MS:-0}
+    volumes:
+      - dashboard-data:/data
+    ports:
+      - "${DASHBOARD_PORT:-8091}:8000"
     depends_on:
       kafka: { condition: service_healthy }
     networks: [backend]
@@ -111,6 +126,31 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
       KAFKA_GROUP_ID: notifier
+      PROCESSING_DELAY_MS: ${NOTIFIER_PROCESSING_DELAY_MS:-0}
+    volumes:
+      - notifier-data:/data
+    ports:
+      - "${NOTIFIER_PORT:-8092}:8000"
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [backend]
+
+  # Consumer ketiga (P5): langganan topic yang sama dengan group baru, tanpa mengubah kode
+  # producer. Hanya jalan kalau diminta: docker compose --profile pemda up -d bnpb-consumer-pemda
+  bnpb-consumer-pemda:
+    <<: *service-defaults
+    build: ./services/bnpb-consumer-dashboard
+    profiles: [pemda]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: bnpb-consumer-pemda
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_GROUP_ID: portal-pemda
+    volumes:
+      - pemda-data:/data
+    ports:
+      - "${PEMDA_PORT:-8093}:8000"
     depends_on:
       kafka: { condition: service_healthy }
     networks: [backend]
@@ -167,3 +207,6 @@ networks:
 volumes:
   mongo-data:
   kafka-data:
+  dashboard-data:
+  notifier-data:
+  pemda-data:

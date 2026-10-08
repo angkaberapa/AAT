@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +11,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/hazards"
+	"github.com/angkaberapa/AAT/services/bnpb-api/internal/limit"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/security"
 )
 
@@ -44,9 +46,16 @@ func main() {
 		logger.Error("initialize hazard handler", "error", err)
 		os.Exit(1)
 	}
-	hazardHandler.Register(mux, verifier.Middleware)
-
-	// TODO(P2): rate limiter / concurrency limit, stale-data response on PVMBG outage
+	// P2: global in-flight cap first (cheap, protects even token verification), then
+	// authentication, then a per-client token bucket keyed by the verified identity.
+	concurrency := limit.Concurrency(cfg.MaxConcurrentRequests)
+	perClient := limit.NewPerClient(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, func(r *http.Request) (string, bool) {
+		principal, ok := security.PrincipalFromContext(r.Context())
+		return principal.ClientID, ok
+	})
+	hazardHandler.Register(mux, func(next http.Handler) http.Handler {
+		return concurrency(verifier.Middleware(perClient.Middleware(next)))
+	})
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
 		logger.Error("server error", "error", err)

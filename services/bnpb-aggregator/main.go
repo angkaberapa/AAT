@@ -14,6 +14,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/ingest"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/mapping"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/publisher"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/reference"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/bmkg"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/pvmbg"
@@ -44,9 +45,23 @@ func main() {
 		logger.Error("canonical store", "error", err.Error())
 		os.Exit(1)
 	}
-	api.Register(mux, logger, st)
+	//P2: status kebaruan data per sumber, diisi poller dan dibaca API (meta.sources / stale_since).
+	tracker := ingest.NewStatusTracker([]domain.Source{domain.SourceBMKG, domain.SourcePVMBG}, cfg.SourceStaleAfter)
+	api.Register(mux, logger, st, tracker)
 
-	// TODO(P5): start Kafka producer
+	//P5: producer Kafka + relay outbox.
+	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)
+	if err != nil {
+		logger.Error("kafka producer", "error", err.Error())
+		os.Exit(1)
+	}
+	relay := publisher.NewRelay(st, producer, logger, cfg.OutboxRelayInterval, cfg.OutboxBatchSize)
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		producer.EnsureTopicUntilReady(ctx, int32(cfg.KafkaTopicPartitions), cfg.KafkaTopicRetention)
+		relay.Run(ctx)
+	}()
 
 	//P2: poller BMKG & PVMBG
 	volcanoes, err := reference.Volcanoes()
@@ -75,13 +90,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	//TODO(P5): publish tiap event ke Kafka di sini
+	//P5: Save nulis data + nandain pending di outbox dalam satu update atomik, relay yang ngirim.
 	handle := func(ctx context.Context, events []domain.HazardEvent) error {
+		counts := map[store.SaveResult]int{}
 		for _, e := range events {
-			if err := st.Save(ctx, e); err != nil {
+			result, err := st.Save(ctx, e)
+			if err != nil {
 				return err
 			}
+			counts[result]++
 		}
+		logger.InfoContext(ctx, "events stored",
+			"inserted", counts[store.Inserted],
+			"updated", counts[store.Updated])
 		return nil
 	}
 
@@ -89,7 +110,7 @@ func main() {
 	pollingDone := make(chan struct{})
 	go func() {
 		defer close(pollingDone)
-		ingest.Run(ctx, logger, cfg.PollInterval, []ingest.SourceClient{bmkgClient, pvmbgClient}, handle)
+		ingest.Run(ctx, logger, cfg.PollInterval, []ingest.SourceClient{bmkgClient, pvmbgClient}, handle, tracker)
 	}()
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
@@ -100,6 +121,8 @@ func main() {
 	//Serve balik kalau ctx ke-cancel. Panggil stop() buat mastiin polling juga dapet sinyal cancel, terus tungguin selesai sebelum store di-close.
 	stop()
 	<-pollingDone
+	<-relayDone
+	producer.Close()
 
 	//Gak pakai defer buat Close, biar urutannya jelas: polling berhenti dulu, baru store.
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
