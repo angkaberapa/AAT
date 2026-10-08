@@ -20,6 +20,9 @@ type Config struct {
 	PVMBGToken      string
 	PollInterval    time.Duration
 	UpstreamTimeout time.Duration
+	// A source with no successful poll for this long is reported stale (P2).
+	// Default: 3 poll intervals + one upstream timeout.
+	SourceStaleAfter time.Duration
 
 	// Canonical Store (owned exclusively by this service)
 	MongoURI string
@@ -50,5 +53,6 @@ func Load() (Config, error) {
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),
 	}
+	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
 	return c, e.Err()
 }

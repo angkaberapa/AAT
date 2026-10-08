@@ -22,6 +22,11 @@ type Config struct {
 	JWKSCacheTTL time.Duration
 
 	UpstreamTimeout time.Duration
+
+	// P2: resource-exhaustion protection. 0 disables the respective limit.
+	MaxConcurrentRequests int
+	RateLimitRPS          int // per client identity (JWT subject)
+	RateLimitBurst        int
 }
 
 func Load() (Config, error) {
@@ -38,6 +43,13 @@ func Load() (Config, error) {
 		JWKSCacheTTL:      e.Seconds("JWKS_CACHE_TTL_SECONDS", 5*time.Minute),
 
 		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 2000*time.Millisecond),
+
+		MaxConcurrentRequests: e.Int("MAX_CONCURRENT_REQUESTS", 128),
+		RateLimitRPS:          e.Int("RATE_LIMIT_RPS", 100),
+		RateLimitBurst:        e.Int("RATE_LIMIT_BURST", 200),
 	}
+	e.Check(c.MaxConcurrentRequests >= 0, "MAX_CONCURRENT_REQUESTS must not be negative")
+	e.Check(c.RateLimitRPS >= 0, "RATE_LIMIT_RPS must not be negative")
+	e.Check(c.RateLimitBurst >= 1, "RATE_LIMIT_BURST must be at least 1")
 	return c, e.Err()
 }

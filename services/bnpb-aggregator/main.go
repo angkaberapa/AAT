@@ -44,7 +44,9 @@ func main() {
 		logger.Error("canonical store", "error", err.Error())
 		os.Exit(1)
 	}
-	api.Register(mux, logger, st)
+	//P2: status kebaruan data per sumber, diisi poller dan dibaca API (meta.sources / stale_since).
+	tracker := ingest.NewStatusTracker([]domain.Source{domain.SourceBMKG, domain.SourcePVMBG}, cfg.SourceStaleAfter)
+	api.Register(mux, logger, st, tracker)
 
 	// TODO(P5): start Kafka producer
 
@@ -89,7 +91,7 @@ func main() {
 	pollingDone := make(chan struct{})
 	go func() {
 		defer close(pollingDone)
-		ingest.Run(ctx, logger, cfg.PollInterval, []ingest.SourceClient{bmkgClient, pvmbgClient}, handle)
+		ingest.Run(ctx, logger, cfg.PollInterval, []ingest.SourceClient{bmkgClient, pvmbgClient}, handle, tracker)
 	}()
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {

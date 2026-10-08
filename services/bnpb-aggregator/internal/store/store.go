@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -13,7 +14,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
 
-//semua event masuk ke satu collection. belum ada rencana sharding.
+// semua event masuk ke satu collection. belum ada rencana sharding.
 const (
 	collectionName = "hazard_events"
 )
@@ -23,7 +24,7 @@ type Store struct {
 	events *mongo.Collection
 }
 
-//New bikin koneksi + pastiin index ada. sengaja gak pakai schema, biar nambah field di Attributes gak perlu migrasi.
+// New bikin koneksi + pastiin index ada. sengaja gak pakai schema, biar nambah field di Attributes gak perlu migrasi.
 func New(ctx context.Context, uri, database string) (*Store, error) {
 	client, err := mongo.Connect(options.Client().
 		ApplyURI(uri).
@@ -61,7 +62,7 @@ func New(ctx context.Context, uri, database string) (*Store, error) {
 	return &Store{client: client, events: events}, nil
 }
 
-//Save = upsert berdasarkan (source, source_ref_id).
+// Save = upsert berdasarkan (source, source_ref_id).
 func (s *Store) Save(ctx context.Context, e domain.HazardEvent) error {
 	filter := bson.D{
 		{Key: "source", Value: e.Source},
@@ -74,15 +75,19 @@ func (s *Store) Save(ctx context.Context, e domain.HazardEvent) error {
 	return nil
 }
 
-//Filter buat List. field yang zero dianggap gak dipakai.
+// Filter buat List. field yang zero dianggap gak dipakai.
 type Filter struct {
 	Since      *time.Time //ingested_at > Since
 	Source     domain.Source
 	HazardType domain.HazardType
 	Severity   domain.Severity
+	//Limit > 0 batasi ukuran snapshot (P2): Limit event TERBARU, tetap urut naik.
+	//Diabaikan kalau Since diisi: banyak event bisa punya ingested_at yang sama persis
+	//(satu batch), jadi motong hasil inkremental bikin event dengan timestamp kembar kelewat.
+	Limit int
 }
 
-//List balikin event yang match, urut dari yang paling lama di-ingest. hasilnya gak pernah nil, biar caller gak perlu cek.
+// List balikin event yang match, urut dari yang paling lama di-ingest. hasilnya gak pernah nil, biar caller gak perlu cek.
 func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error) {
 	filter := bson.D{}
 
@@ -102,8 +107,14 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 		filter = append(filter, bson.E{Key: "severity", Value: f.Severity})
 	}
 
-	cur, err := s.events.Find(ctx, filter,
-		options.Find().SetSort(bson.D{{Key: "ingested_at", Value: 1}}))
+	newestFirst := f.Limit > 0 && f.Since == nil
+	opts := options.Find().SetSort(bson.D{{Key: "ingested_at", Value: 1}})
+	if newestFirst {
+		//ambil N terbaru (sort turun + limit), nanti dibalik lagi biar urutannya tetap naik.
+		opts.SetSort(bson.D{{Key: "ingested_at", Value: -1}}).SetLimit(int64(f.Limit))
+	}
+
+	cur, err := s.events.Find(ctx, filter, opts)
 	if err != nil {
 		return nil, fmt.Errorf("find hazard events: %w", err)
 	}
@@ -113,10 +124,13 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 	if err := cur.All(ctx, &events); err != nil {
 		return nil, fmt.Errorf("decode hazard events: %w", err)
 	}
+	if newestFirst {
+		slices.Reverse(events)
+	}
 	return events, nil
 }
 
-//Get by hazard_id. return (nil, nil) kalau gak ketemu, caller yang mutusin mau 404 atau bukan.
+// Get by hazard_id. return (nil, nil) kalau gak ketemu, caller yang mutusin mau 404 atau bukan.
 func (s *Store) Get(ctx context.Context, hazardID string) (*domain.HazardEvent, error) {
 	var e domain.HazardEvent
 

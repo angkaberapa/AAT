@@ -1,10 +1,12 @@
 package hazards
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -74,8 +76,16 @@ func (handler *Handler) serve(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	payload, err := handler.fetch(request)
+	payload, upstreamHeader, err := handler.fetch(request)
 	if err != nil {
+		var upstream *upstreamError
+		if errors.As(err, &upstream) {
+			if upstream.retryable {
+				w.Header().Set("Retry-After", "1")
+			}
+			writeError(w, upstream.status, upstream.code, upstream.description)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
@@ -86,6 +96,12 @@ func (handler *Handler) serve(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
+	// P2: data freshness markers from the aggregator (also present on single-event responses).
+	for _, name := range freshnessHeaders {
+		if value := upstreamHeader.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
 	if summaryOnly {
 		w.Header().Set("X-Data-Scope", "summary")
 	} else {
@@ -94,7 +110,9 @@ func (handler *Handler) serve(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
-func (handler *Handler) fetch(incoming *http.Request) (any, error) {
+var freshnessHeaders = []string{"X-Data-Stale", "X-Source-Status", "X-Stale-Since"}
+
+func (handler *Handler) fetch(incoming *http.Request) (any, http.Header, error) {
 	endpoint := *handler.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + incoming.URL.Path
 	query := incoming.URL.Query()
@@ -104,25 +122,76 @@ func (handler *Handler) fetch(incoming *http.Request) (any, error) {
 
 	request, err := http.NewRequestWithContext(incoming.Context(), http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("create aggregator request: %w", err)
+		return nil, nil, fmt.Errorf("create aggregator request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	response, err := handler.client.Do(request, "aggregator")
 	if err != nil {
-		return nil, fmt.Errorf("request aggregator: %w", err)
+		return nil, nil, unreachable(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("aggregator returned status %d", response.StatusCode)
+		return nil, nil, upstreamStatus(response)
 	}
 
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxUpstreamResponseBytes))
 	decoder.UseNumber()
 	var payload any
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode aggregator response: %w", err)
+		return nil, nil, fmt.Errorf("decode aggregator response: %w", err)
 	}
-	return payload, nil
+	return payload, response.Header, nil
+}
+
+// upstreamError is a failure talking to the aggregator, already translated into the
+// explicit status the client should see (P2: never a bare 500, never a hang).
+type upstreamError struct {
+	status      int
+	code        string
+	description string
+	retryable   bool
+}
+
+func (err *upstreamError) Error() string { return err.code + ": " + err.description }
+
+func unreachable(err error) error {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return &upstreamError{
+			status:      http.StatusGatewayTimeout,
+			code:        "aggregator_timeout",
+			description: "the aggregator did not respond in time",
+			retryable:   true,
+		}
+	}
+	return &upstreamError{
+		status:      http.StatusServiceUnavailable,
+		code:        "aggregator_unavailable",
+		description: "the aggregator is currently unreachable",
+		retryable:   true,
+	}
+}
+
+// upstreamStatus passes the aggregator's client errors (bad query, unknown id)
+// through unchanged; anything else becomes 502.
+func upstreamStatus(response *http.Response) error {
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, 8<<10)).Decode(&body)
+	switch response.StatusCode {
+	case http.StatusBadRequest:
+		return &upstreamError{status: http.StatusBadRequest, code: "invalid_request", description: body.Error}
+	case http.StatusNotFound:
+		return &upstreamError{status: http.StatusNotFound, code: "not_found", description: body.Error}
+	default:
+		return &upstreamError{
+			status:      http.StatusBadGateway,
+			code:        "upstream_error",
+			description: fmt.Sprintf("aggregator returned status %d", response.StatusCode),
+			retryable:   response.StatusCode >= 500,
+		}
+	}
 }
 
 type fieldDeniedError struct{ field string }
