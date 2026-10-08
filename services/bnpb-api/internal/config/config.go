@@ -45,8 +45,8 @@ func Load() (Config, error) {
 		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 2000*time.Millisecond),
 
 		MaxConcurrentRequests: e.Int("MAX_CONCURRENT_REQUESTS", 128),
-		RateLimitRPS:          e.Int("RATE_LIMIT_RPS", 100),
-		RateLimitBurst:        e.Int("RATE_LIMIT_BURST", 200),
+		RateLimitRPS:          e.Int("RATE_LIMIT_RPS", 300),
+		RateLimitBurst:        e.Int("RATE_LIMIT_BURST", 600),
 	}
 	e.Check(c.MaxConcurrentRequests >= 0, "MAX_CONCURRENT_REQUESTS must not be negative")
 	e.Check(c.RateLimitRPS >= 0, "RATE_LIMIT_RPS must not be negative")
