@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,22 +17,31 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/mapping"
 )
 
-const maxResponseBytes = 4 << 20
+const maxResponseBytes = 16 << 20
 
 type HTTPClient interface {
 	Do(req *http.Request, target string) (*http.Response, error)
 }
 
 type Client struct {
-	baseURL    *url.URL
-	token      string
-	httpClient HTTPClient
-	mapper     *mapping.Mapper
+	baseURL      *url.URL
+	token        string
+	httpClient   HTTPClient
+	mapper       *mapping.Mapper
+	logger       *slog.Logger
+	since        *time.Time
+	pendingSince *time.Time
+	initialized  bool
 }
 
 var _ ingest.SourceClient = (*Client)(nil)
 
-func NewClient(baseURL, token string, httpClient HTTPClient, mapper *mapping.Mapper) (*Client, error) {
+func NewClient(
+	baseURL, token string,
+	httpClient HTTPClient,
+	mapper *mapping.Mapper,
+	loggers ...*slog.Logger,
+) (*Client, error) {
 	parsedBaseURL, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsedBaseURL.Scheme == "" || parsedBaseURL.Host == "" {
 		return nil, fmt.Errorf("invalid PVMBG base URL %q", baseURL)
@@ -45,11 +55,16 @@ func NewClient(baseURL, token string, httpClient HTTPClient, mapper *mapping.Map
 	if mapper == nil {
 		return nil, errors.New("PVMBG mapper is required")
 	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	return &Client{
 		baseURL:    parsedBaseURL,
 		token:      token,
 		httpClient: httpClient,
 		mapper:     mapper,
+		logger:     logger,
 	}, nil
 }
 
@@ -61,6 +76,11 @@ func (client *Client) Fetch(
 	ctx context.Context,
 	since *time.Time,
 ) ([]domain.HazardEvent, error) {
+	if client.initialized {
+		since = cloneTime(client.since)
+	} else {
+		since = cloneTime(since)
+	}
 	endpoint := *client.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/volcanic-reports"
 	if since != nil {
@@ -89,21 +109,86 @@ func (client *Client) Fetch(
 		return nil, responseError(response)
 	}
 
-	var envelope mapping.Envelope[mapping.VolcanicReport]
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes))
-	if err := decoder.Decode(&envelope); err != nil {
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, invalidResponse(fmt.Errorf("read PVMBG response: %w", err))
+	}
+	if len(body) > maxResponseBytes {
+		return nil, invalidResponse(fmt.Errorf("PVMBG response exceeds %d-byte limit", maxResponseBytes))
+	}
+	var envelope struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, invalidResponse(fmt.Errorf("decode PVMBG response: %w", err))
 	}
 
 	events := make([]domain.HazardEvent, 0, len(envelope.Data))
-	for index, report := range envelope.Data {
+	latest := cloneTime(since)
+	for index, raw := range envelope.Data {
+		latest = laterCheckpoint(latest, timestampField(raw, "reported_at"))
+
+		var report mapping.VolcanicReport
+		if err := json.Unmarshal(raw, &report); err != nil {
+			client.logSkipped(ctx, index, err)
+			continue
+		}
 		event, err := client.mapper.MapVolcanicReport(report)
 		if err != nil {
-			return nil, invalidResponse(fmt.Errorf("map PVMBG report at index %d: %w", index, err))
+			client.logSkipped(ctx, index, err)
+			continue
 		}
 		events = append(events, event)
 	}
+	client.pendingSince = latest
 	return events, nil
+}
+
+// CommitFetch advances past every source record observed in the previous
+// response, including malformed records whose reported_at could still be read.
+func (client *Client) CommitFetch() {
+	client.since = cloneTime(client.pendingSince)
+	client.initialized = true
+	client.pendingSince = nil
+}
+
+func (client *Client) logSkipped(ctx context.Context, index int, err error) {
+	client.logger.WarnContext(ctx, "skipping invalid PVMBG source record",
+		"source", domain.SourcePVMBG,
+		"record_type", "volcanic_report",
+		"record_index", index,
+		"error", err.Error())
+}
+
+func timestampField(raw json.RawMessage, field string) *time.Time {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil
+	}
+	var value time.Time
+	if err := json.Unmarshal(fields[field], &value); err != nil || value.IsZero() {
+		return nil
+	}
+	value = value.UTC()
+	return &value
+}
+
+func laterCheckpoint(left, right *time.Time) *time.Time {
+	if left == nil {
+		return cloneTime(right)
+	}
+	if right != nil && right.After(*left) {
+		return cloneTime(right)
+	}
+	return cloneTime(left)
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
 }
 
 func responseError(response *http.Response) error {

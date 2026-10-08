@@ -13,6 +13,10 @@ type SourceClient interface {
 	Fetch(ctx context.Context, since *time.Time) ([]domain.HazardEvent, error)
 }
 
+type FetchCommitter interface {
+	CommitFetch()
+}
+
 type ErrorKind string
 
 const (

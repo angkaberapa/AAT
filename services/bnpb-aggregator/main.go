@@ -78,13 +78,13 @@ func main() {
 
 	httpClient := core.NewHTTPClient(logger, cfg.UpstreamTimeout)
 
-	bmkgClient, err := bmkg.NewClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, httpClient, mapper)
+	bmkgClient, err := bmkg.NewClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, httpClient, mapper, logger)
 	if err != nil {
 		logger.Error("bmkg client", "error", err.Error())
 		os.Exit(1)
 	}
 
-	pvmbgClient, err := pvmbg.NewClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, httpClient, mapper)
+	pvmbgClient, err := pvmbg.NewClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, httpClient, mapper, logger)
 	if err != nil {
 		logger.Error("pvmbg client", "error", err.Error())
 		os.Exit(1)
