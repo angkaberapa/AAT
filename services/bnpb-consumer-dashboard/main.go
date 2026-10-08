@@ -8,7 +8,9 @@ import (
 	"syscall"
 
 	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/config"
+	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/consumer"
 	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/core"
+	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/dashboard"
 )
 
 func main() {
@@ -24,13 +26,35 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	// HTTP server only serves /health; the real work is the Kafka consumer loop.
+	dash, err := dashboard.New(consumer.NewFileState(cfg.StateFile), logger)
+	if err != nil {
+		logger.Error("load dashboard state", "error", err.Error())
+		os.Exit(1)
+	}
 	mux := core.NewMux(cfg.ServiceName)
+	dash.Register(mux)
 
-	// TODO(P5): start Kafka consumer goroutine (idempotent handling, one correlation ID per event)
+	// P5: subscribe to the hazard topic with our own consumer group. The producer does
+	// not know this consumer exists.
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		err := consumer.Run(ctx, logger, consumer.Config{
+			Bootstrap:       cfg.KafkaBootstrapServers,
+			Topic:           cfg.KafkaHazardTopic,
+			Group:           cfg.KafkaGroupID,
+			ProcessingDelay: cfg.ProcessingDelay,
+		}, dash)
+		if err != nil {
+			logger.Error("consumer stopped", "error", err.Error())
+			stop()
+		}
+	}()
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}
+	stop()
+	<-consumerDone
 }

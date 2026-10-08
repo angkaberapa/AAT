@@ -53,6 +53,10 @@ services:
       MONGO_DB: ${MONGO_DB:-bnpb}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_TOPIC_PARTITIONS: ${KAFKA_TOPIC_PARTITIONS:-3}
+      KAFKA_TOPIC_RETENTION_HOURS: ${KAFKA_TOPIC_RETENTION_HOURS:-168}
+      OUTBOX_RELAY_INTERVAL_MS: ${OUTBOX_RELAY_INTERVAL_MS:-1000}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
     depends_on:
       mongo: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -105,6 +109,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
       KAFKA_GROUP_ID: dashboard-updater
+      PROCESSING_DELAY_MS: ${DASHBOARD_PROCESSING_DELAY_MS:-0}
+    volumes:
+      - dashboard-data:/data
+    ports:
+      - "${DASHBOARD_PORT:-8091}:8000"
     depends_on:
       kafka: { condition: service_healthy }
     networks: [backend]
@@ -117,6 +126,31 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
       KAFKA_GROUP_ID: notifier
+      PROCESSING_DELAY_MS: ${NOTIFIER_PROCESSING_DELAY_MS:-0}
+    volumes:
+      - notifier-data:/data
+    ports:
+      - "${NOTIFIER_PORT:-8092}:8000"
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [backend]
+
+  # Consumer ketiga (P5): langganan topic yang sama dengan group baru, tanpa mengubah kode
+  # producer. Hanya jalan kalau diminta: docker compose --profile pemda up -d bnpb-consumer-pemda
+  bnpb-consumer-pemda:
+    <<: *service-defaults
+    build: ./services/bnpb-consumer-dashboard
+    profiles: [pemda]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: bnpb-consumer-pemda
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_GROUP_ID: portal-pemda
+    volumes:
+      - pemda-data:/data
+    ports:
+      - "${PEMDA_PORT:-8093}:8000"
     depends_on:
       kafka: { condition: service_healthy }
     networks: [backend]
@@ -173,3 +207,6 @@ networks:
 volumes:
   mongo-data:
   kafka-data:
+  dashboard-data:
+  notifier-data:
+  pemda-data:

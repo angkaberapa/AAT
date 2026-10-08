@@ -41,7 +41,7 @@ func New(ctx context.Context, uri, database string) (*Store, error) {
 	events := client.Database(database).Collection(collectionName)
 
 	//source + source_ref_id = natural key. retry/repoll harus jadi upsert, bukan duplikat.
-	_, err = events.Indexes().CreateMany(ctx, []mongo.IndexModel{
+	indexes := []mongo.IndexModel{
 		{
 			Keys:    bson.D{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
 			Options: options.Index().SetUnique(true),
@@ -53,7 +53,8 @@ func New(ctx context.Context, uri, database string) (*Store, error) {
 			Keys:    bson.D{{Key: "hazard_id", Value: 1}},
 			Options: options.Index().SetUnique(true),
 		},
-	})
+	}
+	_, err = events.Indexes().CreateMany(ctx, append(indexes, outboxIndexes()...))
 	if err != nil {
 		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("create indexes: %w", err)
@@ -62,18 +63,7 @@ func New(ctx context.Context, uri, database string) (*Store, error) {
 	return &Store{client: client, events: events}, nil
 }
 
-// Save = upsert berdasarkan (source, source_ref_id).
-func (s *Store) Save(ctx context.Context, e domain.HazardEvent) error {
-	filter := bson.D{
-		{Key: "source", Value: e.Source},
-		{Key: "source_ref_id", Value: e.SourceRefID},
-	}
-
-	if _, err := s.events.ReplaceOne(ctx, filter, e, options.Replace().SetUpsert(true)); err != nil {
-		return fmt.Errorf("save hazard event %s/%s: %w", e.Source, e.SourceRefID, err)
-	}
-	return nil
-}
+// Save ada di outbox.go: upsert idempoten + penanda outbox untuk publisher (P5).
 
 // Filter buat List. field yang zero dianggap gak dipakai.
 type Filter struct {

@@ -31,6 +31,12 @@ type Config struct {
 	// Message broker
 	KafkaBootstrapServers string
 	KafkaHazardTopic      string
+	// P5: topic created by the aggregator; retention = how long a stopped consumer can catch up.
+	KafkaTopicPartitions int
+	KafkaTopicRetention  time.Duration
+	// P5: outbox relay
+	OutboxRelayInterval time.Duration
+	OutboxBatchSize     int
 }
 
 func Load() (Config, error) {
@@ -53,6 +59,14 @@ func Load() (Config, error) {
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),
 	}
+	c.KafkaTopicPartitions = e.Int("KAFKA_TOPIC_PARTITIONS", 3)
+	retentionHours := e.Int("KAFKA_TOPIC_RETENTION_HOURS", 168)
+	e.Check(retentionHours >= 1, "KAFKA_TOPIC_RETENTION_HOURS must be at least 1")
+	c.KafkaTopicRetention = time.Duration(retentionHours) * time.Hour
+	c.OutboxRelayInterval = e.Millis("OUTBOX_RELAY_INTERVAL_MS", time.Second)
+	c.OutboxBatchSize = e.Int("OUTBOX_BATCH_SIZE", 100)
+	e.Check(c.KafkaTopicPartitions >= 1, "KAFKA_TOPIC_PARTITIONS must be at least 1")
+	e.Check(c.OutboxBatchSize >= 1, "OUTBOX_BATCH_SIZE must be at least 1")
 	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
 	return c, e.Err()
 }
