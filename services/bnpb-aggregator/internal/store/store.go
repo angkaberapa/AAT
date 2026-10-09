@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/event"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
@@ -23,12 +25,15 @@ type Store struct {
 	client *mongo.Client
 	events *mongo.Collection
 }
+const serverSelectionTimeout = 3 * time.Second
 
 // New bikin koneksi + pastiin index ada. sengaja gak pakai schema, biar nambah field di Attributes gak perlu migrasi.
-func New(ctx context.Context, uri, database string) (*Store, error) {
+func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store, error) {
 	client, err := mongo.Connect(options.Client().
 		ApplyURI(uri).
-		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true}))
+		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true}).
+		SetServerSelectionTimeout(serverSelectionTimeout).
+		SetMonitor(latencyMonitor(logger)))
 	if err != nil {
 		return nil, fmt.Errorf("connect mongo: %w", err)
 	}
@@ -61,6 +66,21 @@ func New(ctx context.Context, uri, database string) (*Store, error) {
 	}
 
 	return &Store{client: client, events: events}, nil
+}
+
+func latencyMonitor(logger *slog.Logger) *event.CommandMonitor {
+	return &event.CommandMonitor{
+		Succeeded: func(ctx context.Context, e *event.CommandSucceededEvent) {
+			logger.InfoContext(ctx, "outbound call", "target", "mongo", "command", e.CommandName, "latency_ms", millis(e.Duration))
+		},
+		Failed: func(ctx context.Context, e *event.CommandFailedEvent) {
+			logger.WarnContext(ctx, "outbound call failed", "target", "mongo", "command", e.CommandName, "latency_ms", millis(e.Duration), "error", e.Failure.Error())
+		},
+	}
+}
+
+func millis(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
 }
 
 // Save ada di outbox.go: upsert idempoten + penanda outbox untuk publisher (P5).

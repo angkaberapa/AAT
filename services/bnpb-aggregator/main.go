@@ -39,7 +39,7 @@ func main() {
 
 	//P4: Mongo (Canonical Store) + internal read API
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	st, err := store.New(connectCtx, cfg.MongoURI, cfg.MongoDB)
+	st, err := store.New(connectCtx, logger, cfg.MongoURI, cfg.MongoDB)
 	cancel()
 	if err != nil {
 		logger.Error("canonical store", "error", err.Error())
