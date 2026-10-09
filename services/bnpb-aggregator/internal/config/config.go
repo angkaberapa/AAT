@@ -37,6 +37,10 @@ type Config struct {
 	// P5: outbox relay
 	OutboxRelayInterval time.Duration
 	OutboxBatchSize     int
+
+	//P2
+	SnapshotDefaultLimit int
+	SnapshotMaxLimit     int
 }
 
 func Load() (Config, error) {
@@ -67,6 +71,10 @@ func Load() (Config, error) {
 	c.OutboxBatchSize = e.Int("OUTBOX_BATCH_SIZE", 100)
 	e.Check(c.KafkaTopicPartitions >= 1, "KAFKA_TOPIC_PARTITIONS must be at least 1")
 	e.Check(c.OutboxBatchSize >= 1, "OUTBOX_BATCH_SIZE must be at least 1")
+	c.SnapshotDefaultLimit = e.Int("SNAPSHOT_DEFAULT_LIMIT", 200)
+	c.SnapshotMaxLimit = e.Int("SNAPSHOT_MAX_LIMIT", 1000)
+	e.Check(c.SnapshotDefaultLimit >= 1, "SNAPSHOT_DEFAULT_LIMIT must be at least 1")
+	e.Check(c.SnapshotDefaultLimit <= c.SnapshotMaxLimit, "SNAPSHOT_DEFAULT_LIMIT must not exceed SNAPSHOT_MAX_LIMIT")
 	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
 	return c, e.Err()
 }

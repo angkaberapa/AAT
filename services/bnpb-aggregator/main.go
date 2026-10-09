@@ -47,7 +47,7 @@ func main() {
 	}
 	//P2: status kebaruan data per sumber, diisi poller dan dibaca API (meta.sources / stale_since).
 	tracker := ingest.NewStatusTracker([]domain.Source{domain.SourceBMKG, domain.SourcePVMBG}, cfg.SourceStaleAfter)
-	api.Register(mux, logger, st, tracker)
+	api.Register(mux, logger, st, tracker, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
 
 	//P5: producer Kafka + relay outbox.
 	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)

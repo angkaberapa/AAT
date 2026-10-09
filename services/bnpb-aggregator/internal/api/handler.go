@@ -21,6 +21,13 @@ const (
 	maxLimit     = 1000
 )
 
+type snapshotLimits struct{ def, upper int }
+type Option func(*snapshotLimits)
+
+func WithSnapshotLimits(def, upper int) Option {
+	return func(l *snapshotLimits) { l.def, l.upper = def, upper }
+}
+
 // Reader = yang dibutuhin api dari store. sengaja interface kecil, biar gampang dimock waktu test handler.
 type Reader interface {
 	List(ctx context.Context, f store.Filter) ([]domain.HazardEvent, error)
@@ -34,9 +41,14 @@ type StatusProvider interface {
 }
 
 // Register daftarin route read yang dipakai bnpb-api. bnpb-api nerusin path + query apa adanya (kecuali `fields`), jadi di sini tinggal terima.
-func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses StatusProvider) {
+func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses StatusProvider, opts ...Option) {
+	limits := snapshotLimits{def: defaultLimit, upper: maxLimit}
+	for _, opt := range opts {
+		opt(&limits)
+	}
+
 	mux.HandleFunc("GET /hazards", func(w http.ResponseWriter, r *http.Request) {
-		filter, problem := parseFilter(r)
+		filter, problem := parseFilter(r, limits)
 		if problem != "" {
 			writeError(w, http.StatusBadRequest, problem)
 			return
@@ -80,7 +92,7 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 
 // parseFilter balikin (filter, pesanError).
 // todo: validasi enum-nya masih hardcoded di sini. kalau nambah Source atau HazardType baru update di sini + di domain.
-func parseFilter(r *http.Request) (store.Filter, string) {
+func parseFilter(r *http.Request, limits snapshotLimits) (store.Filter, string) {
 	var f store.Filter
 	q := r.URL.Query()
 
@@ -116,11 +128,11 @@ func parseFilter(r *http.Request) (store.Filter, string) {
 		}
 	}
 
-	f.Limit = defaultLimit
+	f.Limit = limits.def
 	if raw := q.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > maxLimit {
-			return f, "invalid 'limit', expected an integer between 1 and " + strconv.Itoa(maxLimit)
+		if err != nil || n < 1 || n > limits.upper {
+			return f, "invalid 'limit', expected an integer between 1 and " + strconv.Itoa(limits.upper)
 		}
 		f.Limit = n
 	}
