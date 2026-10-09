@@ -102,7 +102,8 @@ func main() {
 		}
 		logger.InfoContext(ctx, "events stored",
 			"inserted", counts[store.Inserted],
-			"updated", counts[store.Updated])
+			"updated", counts[store.Updated],
+			"unchanged", counts[store.Unchanged])
 		return nil
 	}
 

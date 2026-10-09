@@ -8,12 +8,17 @@ package store
 // published, and polling never waits on Kafka. A separate relay (internal/publisher)
 // publishes pending documents and marks them published.
 //
-// Every Save marks the event pending, even if its content did not change. A re-fetched,
-// unchanged event is therefore published again; consumers handle that because delivery
-// is at-least-once anyway and they deduplicate by (hazard_id, version).
+// Save only writes when the canonical content changed (compared by content hash), so
+// `version` means "the content changed" and a re-fetched, unchanged event is not
+// published again. Re-fetches happen on every aggregator restart: the BMKG client
+// rebuilds its warning-correlation cache by fetching the full history (R1), so the
+// polling cursor is deliberately not restored from the store (R7 not applied).
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -29,12 +34,14 @@ import (
 type SaveResult string
 
 const (
-	Inserted SaveResult = "inserted"
-	Updated  SaveResult = "updated" // existing event written again (re-fetch or changed content)
+	Inserted  SaveResult = "inserted"
+	Updated   SaveResult = "updated"   // canonical content changed, e.g. severity raised by a late warning
+	Unchanged SaveResult = "unchanged" // same content as stored (re-fetch, retried batch): nothing written
 )
 
 type outboxMeta struct {
 	Version       int        `bson:"version"`
+	ContentHash   string     `bson:"content_hash"`
 	Pending       bool       `bson:"pending"`
 	CorrelationID string     `bson:"correlation_id"` // poll cycle that produced this version
 	ChangedAt     time.Time  `bson:"changed_at"`
@@ -63,27 +70,57 @@ func outboxIndexes() []mongo.IndexModel {
 	}}
 }
 
-// Save upserts e by (source, source_ref_id) in a single atomic update:
-//   - event fields are set, except ingested_at, which is only written when the document
-//     is created, so it keeps the time BNPB first received the event (R4)
-//   - outbox.version is incremented and outbox.pending set, so the relay publishes it
+// ContentHash identifies the canonical content of an event. ingested_at is excluded: it
+// records when BNPB first received the event, not what the event says. json.Marshal sorts
+// map keys, so the random iteration order of Attributes does not change the hash.
+func ContentHash(e domain.HazardEvent) (string, error) {
+	e.IngestedAt = time.Time{}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return "", fmt.Errorf("hash hazard event: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// Save upserts e by (source, source_ref_id) in a single atomic operation:
+//   - new event        -> inserted, outbox.version 1, pending
+//   - changed content  -> event fields updated (ingested_at kept, R4), version + 1, pending
+//   - same content     -> nothing written, version unchanged, not published
+//
+// "Same content" is detected inside the same operation: the filter only matches a stored
+// document whose content_hash differs. When the hash is equal the filter matches nothing,
+// so the upsert tries to insert a second document with the same (source, source_ref_id)
+// and the unique index rejects it with a duplicate key error, which means Unchanged.
 func (s *Store) Save(ctx context.Context, e domain.HazardEvent) (SaveResult, error) {
+	hash, err := ContentHash(e)
+	if err != nil {
+		return "", err
+	}
 	fields, err := toDocument(e)
 	if err != nil {
 		return "", err
 	}
 	delete(fields, "ingested_at")
+	fields["outbox.content_hash"] = hash
 	fields["outbox.pending"] = true
 	fields["outbox.correlation_id"] = core.CorrelationID(ctx)
 	fields["outbox.changed_at"] = time.Now().UTC()
 
-	key := bson.D{{Key: "source", Value: e.Source}, {Key: "source_ref_id", Value: e.SourceRefID}}
+	filter := bson.D{
+		{Key: "source", Value: e.Source},
+		{Key: "source_ref_id", Value: e.SourceRefID},
+		{Key: "outbox.content_hash", Value: bson.D{{Key: "$ne", Value: hash}}},
+	}
 	update := bson.D{
 		{Key: "$set", Value: fields},
 		{Key: "$inc", Value: bson.D{{Key: "outbox.version", Value: 1}}},
 		{Key: "$setOnInsert", Value: bson.D{{Key: "ingested_at", Value: e.IngestedAt}}},
 	}
-	res, err := s.events.UpdateOne(ctx, key, update, options.UpdateOne().SetUpsert(true))
+	res, err := s.events.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return Unchanged, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("save hazard event %s/%s: %w", e.Source, e.SourceRefID, err)
 	}
