@@ -39,7 +39,7 @@ func main() {
 
 	//P4: Mongo (Canonical Store) + internal read API
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	st, err := store.New(connectCtx, cfg.MongoURI, cfg.MongoDB)
+	st, err := store.New(connectCtx, logger, cfg.MongoURI, cfg.MongoDB)
 	cancel()
 	if err != nil {
 		logger.Error("canonical store", "error", err.Error())
@@ -47,7 +47,7 @@ func main() {
 	}
 	//P2: status kebaruan data per sumber, diisi poller dan dibaca API (meta.sources / stale_since).
 	tracker := ingest.NewStatusTracker([]domain.Source{domain.SourceBMKG, domain.SourcePVMBG}, cfg.SourceStaleAfter)
-	api.Register(mux, logger, st, tracker)
+	api.Register(mux, logger, st, tracker, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
 
 	//P5: producer Kafka + relay outbox.
 	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)

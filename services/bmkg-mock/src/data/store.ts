@@ -69,7 +69,9 @@ export function getSeismicEventsSince(since?: Date): SeismicEvent[] {
 }
 
 export function getTsunamiWarningsSince(since?: Date): TsunamiWarning[] {
+  const now = Date.now();
   return tsunamiWarnings
+    .filter((w) => w.issued_at.getTime() <= now)
     .filter((w) => since === undefined || w.issued_at.getTime() > since.getTime())
     .sort((a, b) => a.issued_at.getTime() - b.issued_at.getTime());
 }
