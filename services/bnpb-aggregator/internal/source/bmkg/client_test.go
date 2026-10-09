@@ -140,3 +140,151 @@ func TestFetchClassifiesSourceOutage(t *testing.T) {
 		t.Fatalf("unexpected source error: %+v", sourceError)
 	}
 }
+
+func TestFetchSkipsMalformedRecordAndCommitsObservedTimestamp(t *testing.T) {
+	t.Parallel()
+	seismicCalls := 0
+	httpClient := fakeHTTPClient{do: func(request *http.Request, _ string) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/seismic-events":
+			seismicCalls++
+			if seismicCalls == 2 {
+				if got := request.URL.Query().Get("since"); got != "2026-10-03T08:30:00Z" {
+					t.Fatalf("second seismic since = %q, want malformed record timestamp", got)
+				}
+				return response(http.StatusOK, `{"data":[]}`), nil
+			}
+			return response(http.StatusOK, `{"data":[
+				{
+					"event_id":"BMKG-EQ-BAD",
+					"depth_km":10,
+					"epicenter_lat":-6.2,
+					"epicenter_lon":106.8,
+					"region_name":"Banten",
+					"occurred_at":"2026-10-03T08:30:00Z",
+					"potential_tsunami":false
+				},
+				{
+					"event_id":"BMKG-EQ-GOOD",
+					"magnitude":5.5,
+					"depth_km":10,
+					"epicenter_lat":-6.2,
+					"epicenter_lon":106.8,
+					"region_name":"Banten",
+					"occurred_at":"2026-10-03T08:20:00Z",
+					"potential_tsunami":false
+				}
+			]}`), nil
+		case "/tsunami-warnings":
+			return response(http.StatusOK, `{"data":[]}`), nil
+		default:
+			t.Fatalf("unexpected path %q", request.URL.Path)
+			return nil, nil
+		}
+	}}
+
+	client, err := NewClient("http://bmkg.test", "bmkg-test-key", httpClient, testMapper(t))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	since := time.Date(2026, time.October, 3, 8, 0, 0, 0, time.UTC)
+	events, err := client.Fetch(context.Background(), &since)
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if len(events) != 1 || events[0].SourceRefID != "BMKG-EQ-GOOD" {
+		t.Fatalf("events = %+v, want only valid record", events)
+	}
+	client.CommitFetch()
+
+	if _, err := client.Fetch(context.Background(), &since); err != nil {
+		t.Fatalf("second Fetch() error = %v", err)
+	}
+}
+
+func TestFetchAppliesLateWarningRetriesUntilCommitAndKeepsHighestLevel(t *testing.T) {
+	t.Parallel()
+	eventCalls := 0
+	warningCalls := 0
+	httpClient := fakeHTTPClient{do: func(request *http.Request, _ string) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/seismic-events":
+			eventCalls++
+			if eventCalls > 1 {
+				return response(http.StatusOK, `{"data":[]}`), nil
+			}
+			return response(http.StatusOK, `{"data":[{
+				"event_id":"BMKG-EQ-LATE",
+				"magnitude":4.5,
+				"depth_km":12,
+				"epicenter_lat":-6.2,
+				"epicenter_lon":106.8,
+				"region_name":"Banten",
+				"occurred_at":"2026-10-03T08:00:00Z",
+				"potential_tsunami":true
+			}]}`), nil
+		case "/tsunami-warnings":
+			warningCalls++
+			switch warningCalls {
+			case 1:
+				return response(http.StatusOK, `{"data":[]}`), nil
+			case 2, 3:
+				return response(http.StatusOK, `{"data":[{
+					"warning_id":"BMKG-TW-WASPADA",
+					"related_event_id":"BMKG-EQ-LATE",
+					"threat_level":"Waspada",
+					"affected_zones":["Banten"],
+					"estimated_arrival":"2026-10-03T08:30:00Z",
+					"issued_at":"2026-10-03T08:01:00Z"
+				}]}`), nil
+			default:
+				return response(http.StatusOK, `{"data":[
+					{
+						"warning_id":"BMKG-TW-AWAS",
+						"related_event_id":"BMKG-EQ-LATE",
+						"threat_level":"Awas",
+						"affected_zones":["Banten"],
+						"estimated_arrival":"2026-10-03T08:30:00Z",
+						"issued_at":"2026-10-03T08:02:00Z"
+					},
+					{
+						"warning_id":"BMKG-TW-SIAGA-LATER",
+						"related_event_id":"BMKG-EQ-LATE",
+						"threat_level":"Siaga",
+						"affected_zones":["Banten"],
+						"estimated_arrival":"2026-10-03T08:35:00Z",
+						"issued_at":"2026-10-03T08:03:00Z"
+					}
+				]}`), nil
+			}
+		default:
+			t.Fatalf("unexpected path %q", request.URL.Path)
+			return nil, nil
+		}
+	}}
+
+	client, err := NewClient("http://bmkg.test", "bmkg-test-key", httpClient, testMapper(t))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	initial, err := client.Fetch(context.Background(), nil)
+	if err != nil || len(initial) != 1 {
+		t.Fatalf("initial Fetch() events = %d, error = %v", len(initial), err)
+	}
+	client.CommitFetch()
+
+	late, err := client.Fetch(context.Background(), nil)
+	if err != nil || len(late) != 1 || late[0].Severity != domain.SeverityWaspada {
+		t.Fatalf("late warning Fetch() = %+v, error = %v", late, err)
+	}
+	retried, err := client.Fetch(context.Background(), nil)
+	if err != nil || len(retried) != 1 || retried[0].Severity != domain.SeverityWaspada {
+		t.Fatalf("retried warning Fetch() = %+v, error = %v", retried, err)
+	}
+	client.CommitFetch()
+
+	highest, err := client.Fetch(context.Background(), nil)
+	if err != nil || len(highest) != 1 || highest[0].Severity != domain.SeverityAwas {
+		t.Fatalf("highest warning Fetch() = %+v, error = %v", highest, err)
+	}
+}

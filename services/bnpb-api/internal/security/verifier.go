@@ -22,7 +22,10 @@ const (
 	ScopeHazardsRead    = "hazards:read"
 )
 
-var ErrInvalidToken = errors.New("invalid access token")
+var (
+	ErrInvalidToken           = errors.New("invalid access token")
+	ErrKeyProviderUnavailable = errors.New("signing key provider unavailable")
+)
 
 type HTTPClient interface {
 	Do(request *http.Request, target string) (*http.Response, error)
@@ -83,6 +86,9 @@ func (verifier *Verifier) Verify(ctx context.Context, raw string) (Principal, er
 		jwt.WithExpirationRequired(),
 		jwt.WithTimeFunc(verifier.clock),
 	)
+	if errors.Is(err, ErrKeyProviderUnavailable) {
+		return Principal{}, ErrKeyProviderUnavailable
+	}
 	if err != nil || !parsed.Valid || claims.TokenType != "access" || claims.Subject == "" {
 		return Principal{}, ErrInvalidToken
 	}
@@ -98,13 +104,16 @@ func (verifier *Verifier) Verify(ctx context.Context, raw string) (Principal, er
 }
 
 type JWKSProvider struct {
-	url       string
-	client    HTTPClient
-	cacheTTL  time.Duration
-	mu        sync.Mutex
-	keys      map[string]ed25519.PublicKey
-	fetchedAt time.Time
-	now       func() time.Time
+	url             string
+	client          HTTPClient
+	cacheTTL        time.Duration
+	mu              sync.RWMutex
+	refreshMu       sync.Mutex
+	keys            map[string]ed25519.PublicKey
+	fetchedAt       time.Time
+	nextRefresh     time.Time
+	refreshFailures uint
+	now             func() time.Time
 }
 
 func NewJWKSProvider(baseURL string, client HTTPClient, cacheTTL time.Duration) (*JWKSProvider, error) {
@@ -128,19 +137,57 @@ func NewJWKSProvider(baseURL string, client HTTPClient, cacheTTL time.Duration) 
 }
 
 func (provider *JWKSProvider) Key(ctx context.Context, kid string) (ed25519.PublicKey, error) {
-	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	if key, exists := provider.keys[kid]; exists && provider.now().Before(provider.fetchedAt.Add(provider.cacheTTL)) {
+	key, exists, fresh := provider.cachedKey(kid)
+	if exists && fresh {
 		return append(ed25519.PublicKey(nil), key...), nil
 	}
-	if err := provider.refresh(ctx); err != nil {
-		return nil, err
+
+	if exists {
+		if provider.refreshAllowed() && provider.refreshMu.TryLock() {
+			err := provider.refresh(ctx)
+			provider.refreshMu.Unlock()
+			if err != nil {
+				return append(ed25519.PublicKey(nil), key...), nil
+			}
+			key, exists, _ = provider.cachedKey(kid)
+			if !exists {
+				return nil, fmt.Errorf("unknown signing key %q", kid)
+			}
+			return append(ed25519.PublicKey(nil), key...), nil
+		}
+		return append(ed25519.PublicKey(nil), key...), nil
 	}
-	key, exists := provider.keys[kid]
+
+	provider.refreshMu.Lock()
+	defer provider.refreshMu.Unlock()
+	if key, exists, fresh = provider.cachedKey(kid); exists && fresh {
+		return append(ed25519.PublicKey(nil), key...), nil
+	}
+	if !provider.refreshAllowed() {
+		return nil, ErrKeyProviderUnavailable
+	}
+	if err := provider.refresh(ctx); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrKeyProviderUnavailable, err)
+	}
+	key, exists, _ = provider.cachedKey(kid)
 	if !exists {
 		return nil, fmt.Errorf("unknown signing key %q", kid)
 	}
 	return append(ed25519.PublicKey(nil), key...), nil
+}
+
+func (provider *JWKSProvider) cachedKey(kid string) (ed25519.PublicKey, bool, bool) {
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	key, exists := provider.keys[kid]
+	fresh := exists && provider.now().Before(provider.fetchedAt.Add(provider.cacheTTL))
+	return append(ed25519.PublicKey(nil), key...), exists, fresh
+}
+
+func (provider *JWKSProvider) refreshAllowed() bool {
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	return !provider.now().Before(provider.nextRefresh)
 }
 
 type jwksDocument struct {
@@ -162,14 +209,17 @@ func (provider *JWKSProvider) refresh(ctx context.Context) error {
 	request.Header.Set("Accept", "application/json")
 	response, err := provider.client.Do(request, "auth")
 	if err != nil {
+		provider.recordRefreshFailure()
 		return fmt.Errorf("fetch JWKS: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		provider.recordRefreshFailure()
 		return fmt.Errorf("fetch JWKS: unexpected status %d", response.StatusCode)
 	}
 	var document jwksDocument
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&document); err != nil {
+		provider.recordRefreshFailure()
 		return fmt.Errorf("decode JWKS: %w", err)
 	}
 	keys := make(map[string]ed25519.PublicKey, len(document.Keys))
@@ -184,11 +234,28 @@ func (provider *JWKSProvider) refresh(ctx context.Context) error {
 		keys[encoded.KeyID] = ed25519.PublicKey(publicKey)
 	}
 	if len(keys) == 0 {
+		provider.recordRefreshFailure()
 		return errors.New("JWKS contains no supported signing keys")
 	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
 	provider.keys = keys
 	provider.fetchedAt = provider.now()
+	provider.nextRefresh = time.Time{}
+	provider.refreshFailures = 0
 	return nil
+}
+
+func (provider *JWKSProvider) recordRefreshFailure() {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	provider.refreshFailures++
+	shift := provider.refreshFailures - 1
+	if shift > 5 {
+		shift = 5
+	}
+	backoff := time.Second * time.Duration(1<<shift)
+	provider.nextRefresh = provider.now().Add(backoff)
 }
 
 type principalContextKey struct{}
@@ -211,10 +278,24 @@ func (verifier *Verifier) Middleware(next http.Handler) http.Handler {
 		}
 		principal, err := verifier.Verify(request.Context(), parts[1])
 		if err != nil {
+			if errors.Is(err, ErrKeyProviderUnavailable) {
+				writeServiceUnavailable(w)
+				return
+			}
 			writeUnauthorized(w, "invalid or expired access token")
 			return
 		}
 		next.ServeHTTP(w, request.WithContext(WithPrincipal(request.Context(), principal)))
+	})
+}
+
+func writeServiceUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             "temporarily_unavailable",
+		"error_description": "token verification service is temporarily unavailable",
 	})
 }
 

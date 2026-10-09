@@ -75,6 +75,7 @@ func (p *poller) cycle(parent context.Context) {
 	}
 
 	if len(events) == 0 {
+		p.commitFetch()
 		p.logger.DebugContext(ctx, "poll cycle: nothing new", "source", source)
 		p.recordSuccess()
 		return
@@ -91,6 +92,7 @@ func (p *poller) cycle(parent context.Context) {
 		return
 	}
 	p.recordSuccess()
+	p.commitFetch()
 
 	//cursor baru digeser setelah handler sukses. kalau digeser duluan, event yang gagal ke-handle bakal hilang selamanya.
 	if latest := newestOccurredAt(events); p.since == nil || latest.After(*p.since) {
@@ -99,6 +101,12 @@ func (p *poller) cycle(parent context.Context) {
 
 	p.logger.InfoContext(ctx, "poll cycle done",
 		"source", source, "events", len(events))
+}
+
+func (p *poller) commitFetch() {
+	if committer, ok := p.client.(FetchCommitter); ok {
+		committer.CommitFetch()
+	}
 }
 
 func (p *poller) recordSuccess() {

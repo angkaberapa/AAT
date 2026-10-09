@@ -1,7 +1,9 @@
 package mapping
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -49,7 +51,8 @@ func (event *SeismicEvent) UnmarshalJSON(data []byte) error {
 		"event_id": {}, "magnitude": {}, "depth_km": {},
 		"epicenter_lat": {}, "epicenter_lon": {}, "region_name": {},
 		"occurred_at": {}, "potential_tsunami": {},
-	})
+	}, "event_id", "magnitude", "depth_km", "epicenter_lat", "epicenter_lon",
+		"region_name", "occurred_at", "potential_tsunami")
 	if err != nil {
 		return err
 	}
@@ -64,7 +67,8 @@ func (warning *TsunamiWarning) UnmarshalJSON(data []byte) error {
 	extra, err := decodeWithUnknownFields(data, &decoded, map[string]struct{}{
 		"warning_id": {}, "related_event_id": {}, "threat_level": {},
 		"affected_zones": {}, "estimated_arrival": {}, "issued_at": {},
-	})
+	}, "warning_id", "related_event_id", "threat_level", "affected_zones",
+		"estimated_arrival", "issued_at")
 	if err != nil {
 		return err
 	}
@@ -80,7 +84,8 @@ func (report *VolcanicReport) UnmarshalJSON(data []byte) error {
 		"report_id": {}, "volcano_id": {}, "alert_level": {},
 		"eruption_count_24h": {}, "ash_column_height_m": {},
 		"reported_at": {}, "confidence_level": {},
-	})
+	}, "report_id", "volcano_id", "alert_level", "eruption_count_24h",
+		"ash_column_height_m", "reported_at")
 	if err != nil {
 		return err
 	}
@@ -89,13 +94,33 @@ func (report *VolcanicReport) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func decodeWithUnknownFields(data []byte, target any, known map[string]struct{}) (map[string]any, error) {
+func decodeWithUnknownFields(
+	data []byte,
+	target any,
+	known map[string]struct{},
+	required ...string,
+) (map[string]any, error) {
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		return nil, err
+	}
+	for _, field := range required {
+		raw, exists := rawFields[field]
+		if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil, fmt.Errorf("required field %q is missing", field)
+		}
+	}
 	if err := json.Unmarshal(data, target); err != nil {
 		return nil, err
 	}
-	var fields map[string]any
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return nil, err
+
+	fields := make(map[string]any, len(rawFields))
+	for field, raw := range rawFields {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("decode field %q: %w", field, err)
+		}
+		fields[field] = value
 	}
 	for field := range known {
 		delete(fields, field)

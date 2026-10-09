@@ -1,13 +1,17 @@
 package security
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +82,12 @@ func (client standardHTTPClient) Do(request *http.Request, _ string) (*http.Resp
 	return client.client.Do(request)
 }
 
+type funcHTTPClient func(*http.Request, string) (*http.Response, error)
+
+func (client funcHTTPClient) Do(request *http.Request, target string) (*http.Response, error) {
+	return client(request, target)
+}
+
 func TestJWKSProviderFetchesEd25519Key(t *testing.T) {
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -104,6 +114,142 @@ func TestJWKSProviderFetchesEd25519Key(t *testing.T) {
 	}
 	if !got.Equal(publicKey) {
 		t.Fatal("JWKS public key does not match")
+	}
+}
+
+func TestJWKSProviderUsesStaleKeyAndBacksOffWhenRefreshFails(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	base := time.Date(2026, time.October, 9, 10, 0, 0, 0, time.UTC)
+	var now = base
+	var calls atomic.Int32
+	var unavailable atomic.Bool
+	client := funcHTTPClient(func(*http.Request, string) (*http.Response, error) {
+		calls.Add(1)
+		if unavailable.Load() {
+			return nil, errors.New("auth is down")
+		}
+		body, _ := json.Marshal(map[string]any{"keys": []map[string]string{{
+			"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
+			"kid": "test-key", "x": base64.RawURLEncoding.EncodeToString(publicKey),
+		}}})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	provider, err := NewJWKSProvider("http://auth.test", client, time.Minute)
+	if err != nil {
+		t.Fatalf("NewJWKSProvider() error = %v", err)
+	}
+	provider.now = func() time.Time { return now }
+
+	if _, err := provider.Key(context.Background(), "test-key"); err != nil {
+		t.Fatalf("initial Key() error = %v", err)
+	}
+	now = base.Add(2 * time.Minute)
+	unavailable.Store(true)
+	stale, err := provider.Key(context.Background(), "test-key")
+	if err != nil || !stale.Equal(publicKey) {
+		t.Fatalf("stale Key() = %v, error = %v", stale, err)
+	}
+	if _, err := provider.Key(context.Background(), "test-key"); err != nil {
+		t.Fatalf("backoff Key() error = %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want initial fetch plus one failed refresh", got)
+	}
+}
+
+func TestJWKSProviderDoesNotQueueStaleReadersBehindRefresh(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	base := time.Date(2026, time.October, 9, 10, 0, 0, 0, time.UTC)
+	now := base
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var calls atomic.Int32
+	client := funcHTTPClient(func(*http.Request, string) (*http.Response, error) {
+		call := calls.Add(1)
+		if call == 2 {
+			close(refreshStarted)
+			<-releaseRefresh
+			return nil, errors.New("auth is down")
+		}
+		body, _ := json.Marshal(map[string]any{"keys": []map[string]string{{
+			"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
+			"kid": "test-key", "x": base64.RawURLEncoding.EncodeToString(publicKey),
+		}}})
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	provider, err := NewJWKSProvider("http://auth.test", client, time.Minute)
+	if err != nil {
+		t.Fatalf("NewJWKSProvider() error = %v", err)
+	}
+	provider.now = func() time.Time { return now }
+	if _, err := provider.Key(context.Background(), "test-key"); err != nil {
+		t.Fatalf("initial Key() error = %v", err)
+	}
+	now = base.Add(2 * time.Minute)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Key(context.Background(), "test-key")
+		firstDone <- err
+	}()
+	<-refreshStarted
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Key(context.Background(), "test-key")
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("concurrent stale Key() error = %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("concurrent stale key reader queued behind JWKS HTTP refresh")
+	}
+	close(releaseRefresh)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("refreshing stale Key() error = %v", err)
+	}
+}
+
+type unavailableKeyProvider struct{}
+
+func (unavailableKeyProvider) Key(context.Context, string) (ed25519.PublicKey, error) {
+	return nil, ErrKeyProviderUnavailable
+}
+
+func TestMiddlewareReturnsServiceUnavailableWhenNoSigningKeyCanBeLoaded(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	base := time.Date(2026, time.October, 9, 10, 0, 0, 0, time.UTC)
+	verifier, err := NewVerifier(unavailableKeyProvider{}, "bnpb-auth", "bnpb-api")
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+	verifier.clock = func() time.Time { return base }
+	raw := signTestToken(t, privateKey, "test-key", base.Add(time.Minute))
+	handler := verifier.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("protected handler should not be called")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/hazards", nil)
+	request.Header.Set("Authorization", "Bearer "+raw)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.Code)
 	}
 }
 

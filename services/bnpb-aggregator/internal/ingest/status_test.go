@@ -106,9 +106,10 @@ func TestSnapshotKeepsRegistrationOrder(t *testing.T) {
 // --- poller integration with the tracker ---
 
 type scriptedClient struct {
-	source domain.Source
-	mu     sync.Mutex
-	errs   []error // consumed one per Fetch; nil entry = success with one event
+	source  domain.Source
+	mu      sync.Mutex
+	errs    []error // consumed one per Fetch; nil entry = success with one event
+	commits int
 }
 
 func (c *scriptedClient) Source() domain.Source { return c.source }
@@ -124,6 +125,12 @@ func (c *scriptedClient) Fetch(ctx context.Context, _ *time.Time) ([]domain.Haza
 		return nil, err
 	}
 	return []domain.HazardEvent{{SourceRefID: "X", OccurredAt: time.Now()}}, nil
+}
+
+func (c *scriptedClient) CommitFetch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commits++
 }
 
 func TestPollerRecordsOutcomes(t *testing.T) {
@@ -160,5 +167,8 @@ func TestPollerRecordsOutcomes(t *testing.T) {
 	p.cycle(ctx)
 	if got := tr.Status(domain.SourcePVMBG); got.Status != StatusStale || got.LastError != "mongo down" {
 		t.Fatalf("after handler failure: %+v", got)
+	}
+	if client.commits != 2 {
+		t.Fatalf("commits = %d, want only the two successfully stored cycles", client.commits)
 	}
 }
