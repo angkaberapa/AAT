@@ -117,6 +117,39 @@ func TestJWKSProviderFetchesEd25519Key(t *testing.T) {
 	}
 }
 
+func TestJWKSProviderDoesNotRefreshFreshCacheForUnknownKey(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	var calls atomic.Int32
+	client := funcHTTPClient(func(*http.Request, string) (*http.Response, error) {
+		calls.Add(1)
+		body, _ := json.Marshal(map[string]any{"keys": []map[string]string{{
+			"kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA",
+			"kid": "known-key", "x": base64.RawURLEncoding.EncodeToString(publicKey),
+		}}})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	provider, err := NewJWKSProvider("http://auth.test", client, time.Minute)
+	if err != nil {
+		t.Fatalf("NewJWKSProvider() error = %v", err)
+	}
+	if _, err := provider.Key(context.Background(), "known-key"); err != nil {
+		t.Fatalf("initial Key() error = %v", err)
+	}
+	if _, err := provider.Key(context.Background(), "unknown-key"); err == nil {
+		t.Fatal("unknown Key() error = nil")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("HTTP calls = %d, want one initial JWKS fetch", got)
+	}
+}
+
 func TestJWKSProviderUsesStaleKeyAndBacksOffWhenRefreshFails(t *testing.T) {
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

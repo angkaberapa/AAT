@@ -99,7 +99,7 @@ def test_blank_report_id_is_rejected() -> None:
 
 def test_naive_reported_at_is_rejected() -> None:
     payload = valid_report_data()
-    payload["reported_at"] = datetime(2026, 9, 25, 10)  # noqa: DTZ001 - deliberately naive
+    payload["reported_at"] = datetime(2026, 9, 25, 10)  # deliberately naive
 
     with pytest.raises(ValidationError):
         VolcanicReport.model_validate(payload)

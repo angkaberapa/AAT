@@ -137,8 +137,11 @@ func NewJWKSProvider(baseURL string, client HTTPClient, cacheTTL time.Duration) 
 }
 
 func (provider *JWKSProvider) Key(ctx context.Context, kid string) (ed25519.PublicKey, error) {
-	key, exists, fresh := provider.cachedKey(kid)
-	if exists && fresh {
+	key, exists, cacheFresh := provider.cachedKey(kid)
+	if cacheFresh {
+		if !exists {
+			return nil, fmt.Errorf("unknown signing key %q", kid)
+		}
 		return append(ed25519.PublicKey(nil), key...), nil
 	}
 
@@ -160,7 +163,10 @@ func (provider *JWKSProvider) Key(ctx context.Context, kid string) (ed25519.Publ
 
 	provider.refreshMu.Lock()
 	defer provider.refreshMu.Unlock()
-	if key, exists, fresh = provider.cachedKey(kid); exists && fresh {
+	if key, exists, cacheFresh = provider.cachedKey(kid); cacheFresh {
+		if !exists {
+			return nil, fmt.Errorf("unknown signing key %q", kid)
+		}
 		return append(ed25519.PublicKey(nil), key...), nil
 	}
 	if !provider.refreshAllowed() {
@@ -180,8 +186,8 @@ func (provider *JWKSProvider) cachedKey(kid string) (ed25519.PublicKey, bool, bo
 	provider.mu.RLock()
 	defer provider.mu.RUnlock()
 	key, exists := provider.keys[kid]
-	fresh := exists && provider.now().Before(provider.fetchedAt.Add(provider.cacheTTL))
-	return append(ed25519.PublicKey(nil), key...), exists, fresh
+	cacheFresh := !provider.fetchedAt.IsZero() && provider.now().Before(provider.fetchedAt.Add(provider.cacheTTL))
+	return append(ed25519.PublicKey(nil), key...), exists, cacheFresh
 }
 
 func (provider *JWKSProvider) refreshAllowed() bool {

@@ -152,6 +152,40 @@ func TestTsunamiWarningOverridesMagnitudeSeverity(t *testing.T) {
 	}
 }
 
+func TestTsunamiWarningDoesNotLowerMagnitudeSeverity(t *testing.T) {
+	t.Parallel()
+	mapper := testMapper(t)
+	event, err := mapper.MapSeismicEvent(
+		SeismicEvent{
+			EventID:          "BMKG-EQ-000003",
+			Magnitude:        7,
+			DepthKM:          15,
+			EpicenterLat:     -7,
+			EpicenterLon:     110,
+			RegionName:       "Jawa",
+			OccurredAt:       fixedOccurred,
+			PotentialTsunami: true,
+		},
+		&TsunamiWarning{
+			WarningID:        "BMKG-TW-000002",
+			RelatedEventID:   "BMKG-EQ-000003",
+			ThreatLevel:      "Waspada",
+			AffectedZones:    []string{"Banten"},
+			EstimatedArrival: fixedOccurred.Add(20 * time.Minute),
+		},
+	)
+	if err != nil {
+		t.Fatalf("MapSeismicEvent() error = %v", err)
+	}
+	if event.Severity != domain.SeveritySiaga {
+		t.Fatalf("severity = %q, want %q", event.Severity, domain.SeveritySiaga)
+	}
+	warningAttributes := event.Attributes["tsunami_warning"].(map[string]any)
+	if _, exists := warningAttributes["issued_at"]; exists {
+		t.Fatal("missing source issued_at was emitted as a zero timestamp")
+	}
+}
+
 func TestMapVolcanicReportRejectsUnknownReference(t *testing.T) {
 	t.Parallel()
 	mapper := testMapper(t)

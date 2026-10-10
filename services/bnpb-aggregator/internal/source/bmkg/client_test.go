@@ -121,6 +121,61 @@ func TestFetchCorrelatesWarningAndMapsCanonicalEvent(t *testing.T) {
 	}
 }
 
+func TestFetchAcceptsSpecWarningWithoutIssuedAt(t *testing.T) {
+	t.Parallel()
+	warningCalls := 0
+	httpClient := fakeHTTPClient{do: func(request *http.Request, _ string) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/seismic-events":
+			return response(http.StatusOK, `{"data":[{
+				"event_id":"BMKG-EQ-NO-ISSUED-AT",
+				"magnitude":4.5,
+				"depth_km":12.5,
+				"epicenter_lat":-6.2,
+				"epicenter_lon":106.8,
+				"region_name":"Banten",
+				"occurred_at":"2026-10-03T08:30:00Z",
+				"potential_tsunami":true
+			}]}`), nil
+		case "/tsunami-warnings":
+			warningCalls++
+			if got := request.URL.Query().Get("since"); got != "" {
+				t.Fatalf("warning since = %q, want empty without source issued_at", got)
+			}
+			return response(http.StatusOK, `{"data":[{
+				"warning_id":"BMKG-TW-NO-ISSUED-AT",
+				"related_event_id":"BMKG-EQ-NO-ISSUED-AT",
+				"threat_level":"Awas",
+				"affected_zones":["Banten"],
+				"estimated_arrival":"2026-10-03T09:00:00Z"
+			}]}`), nil
+		default:
+			t.Fatalf("unexpected path %q", request.URL.Path)
+			return nil, nil
+		}
+	}}
+
+	client, err := NewClient("http://bmkg.test", "bmkg-test-key", httpClient, testMapper(t))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	events, err := client.Fetch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Severity != domain.SeverityAwas {
+		t.Fatalf("events = %+v, want one AWAS event", events)
+	}
+	client.CommitFetch()
+
+	if _, err := client.Fetch(context.Background(), nil); err != nil {
+		t.Fatalf("second Fetch() error = %v", err)
+	}
+	if warningCalls != 2 {
+		t.Fatalf("warning calls = %d, want 2", warningCalls)
+	}
+}
+
 func TestFetchClassifiesSourceOutage(t *testing.T) {
 	t.Parallel()
 	httpClient := fakeHTTPClient{do: func(*http.Request, string) (*http.Response, error) {
