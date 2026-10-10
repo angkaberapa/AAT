@@ -68,7 +68,7 @@ func (warning *TsunamiWarning) UnmarshalJSON(data []byte) error {
 		"warning_id": {}, "related_event_id": {}, "threat_level": {},
 		"affected_zones": {}, "estimated_arrival": {}, "issued_at": {},
 	}, "warning_id", "related_event_id", "threat_level", "affected_zones",
-		"estimated_arrival", "issued_at")
+		"estimated_arrival")
 	if err != nil {
 		return err
 	}

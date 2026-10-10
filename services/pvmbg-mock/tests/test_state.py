@@ -27,7 +27,7 @@ async def test_seeded_state_contains_required_historical_data() -> None:
 def test_seed_builder_rejects_naive_reference_time() -> None:
     with pytest.raises(ValueError, match="timezone"):
         build_seed_reports(
-            datetime(2026, 9, 28, 12),  # noqa: DTZ001 - deliberately naive
+            datetime(2026, 9, 28, 12),  # deliberately naive
         )
 
 
@@ -56,7 +56,7 @@ async def test_since_filter_rejects_naive_datetime() -> None:
 
     with pytest.raises(ValueError, match="timezone"):
         await state.list_reports(
-            datetime(2026, 9, 28, 12),  # noqa: DTZ001 - deliberately naive
+            datetime(2026, 9, 28, 12),  # deliberately naive
         )
 
 

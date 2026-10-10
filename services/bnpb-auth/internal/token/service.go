@@ -147,6 +147,7 @@ func (service *Service) Issue(clientID, clientSecret string) (Pair, error) {
 
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	service.deleteExpiredRefreshTokens(service.now().UTC())
 	return service.issuePair(client.id, client.scope)
 }
 
@@ -158,6 +159,7 @@ func (service *Service) Refresh(rawToken string) (Pair, error) {
 
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	service.deleteExpiredRefreshTokens(service.now().UTC())
 	record, exists := service.refresh[digest]
 	if !exists {
 		return Pair{}, ErrInvalidRefreshToken
@@ -173,6 +175,14 @@ func (service *Service) Refresh(rawToken string) (Pair, error) {
 	}
 	delete(service.refresh, digest)
 	return pair, nil
+}
+
+func (service *Service) deleteExpiredRefreshTokens(now time.Time) {
+	for digest, record := range service.refresh {
+		if !now.Before(record.expires) {
+			delete(service.refresh, digest)
+		}
+	}
 }
 
 func (service *Service) issuePair(clientID, scope string) (Pair, error) {

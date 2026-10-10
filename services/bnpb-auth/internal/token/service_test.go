@@ -98,6 +98,22 @@ func TestExpiredRefreshTokenIsRejected(t *testing.T) {
 	}
 }
 
+func TestIssueRemovesExpiredRefreshTokens(t *testing.T) {
+	service := newTestService(t)
+	base := time.Date(2026, time.October, 4, 0, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return base }
+	if _, err := service.Issue("field", "field-secret"); err != nil {
+		t.Fatalf("first Issue() error = %v", err)
+	}
+	service.now = func() time.Time { return base.Add(11 * time.Minute) }
+	if _, err := service.Issue("field", "field-secret"); err != nil {
+		t.Fatalf("second Issue() error = %v", err)
+	}
+	if got := len(service.refresh); got != 1 {
+		t.Fatalf("stored refresh tokens = %d, want only the new token", got)
+	}
+}
+
 func TestHandlerRejectsInvalidClientAndExposesJWKS(t *testing.T) {
 	service := newTestService(t)
 	handler := NewHandler(service)
