@@ -58,7 +58,7 @@ func (mapper *Mapper) MapSeismicEvent(
 		if err != nil {
 			return domain.HazardEvent{}, err
 		}
-		severity = higherSeverity(severity, warningSeverity)
+		severity = warningSeverity
 		warningAttributes := copyAttributes(warning.AdditionalFields)
 		warningAttributes["warning_id"] = warning.WarningID
 		warningAttributes["threat_level"] = warning.ThreatLevel
@@ -152,19 +152,6 @@ func severityFromThreatLevel(level string) (domain.Severity, error) {
 	default:
 		return "", fmt.Errorf("unknown tsunami threat_level %q", level)
 	}
-}
-
-func higherSeverity(first, second domain.Severity) domain.Severity {
-	rank := map[domain.Severity]int{
-		domain.SeverityNormal:  0,
-		domain.SeverityWaspada: 1,
-		domain.SeveritySiaga:   2,
-		domain.SeverityAwas:    3,
-	}
-	if rank[second] > rank[first] {
-		return second
-	}
-	return first
 }
 
 func severityFromAlertLevel(level string) (domain.Severity, error) {

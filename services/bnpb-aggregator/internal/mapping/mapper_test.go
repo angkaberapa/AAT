@@ -152,7 +152,7 @@ func TestTsunamiWarningOverridesMagnitudeSeverity(t *testing.T) {
 	}
 }
 
-func TestTsunamiWarningDoesNotLowerMagnitudeSeverity(t *testing.T) {
+func TestTsunamiWarningOverridesHigherMagnitudeSeverity(t *testing.T) {
 	t.Parallel()
 	mapper := testMapper(t)
 	event, err := mapper.MapSeismicEvent(
@@ -177,8 +177,8 @@ func TestTsunamiWarningDoesNotLowerMagnitudeSeverity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MapSeismicEvent() error = %v", err)
 	}
-	if event.Severity != domain.SeveritySiaga {
-		t.Fatalf("severity = %q, want %q", event.Severity, domain.SeveritySiaga)
+	if event.Severity != domain.SeverityWaspada {
+		t.Fatalf("severity = %q, want %q", event.Severity, domain.SeverityWaspada)
 	}
 	warningAttributes := event.Attributes["tsunami_warning"].(map[string]any)
 	if _, exists := warningAttributes["issued_at"]; exists {
