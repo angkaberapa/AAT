@@ -78,10 +78,11 @@ type Service struct {
 	refreshTTL time.Duration
 	clients    map[string]storedClient
 
-	mu      sync.Mutex
-	refresh map[[sha256.Size]byte]refreshRecord
-	now     func() time.Time
-	random  io.Reader
+	mu        sync.Mutex
+	refresh   map[[sha256.Size]byte]refreshRecord
+	lastSweep time.Time // dilindungi mu
+	now       func() time.Time
+	random    io.Reader
 }
 
 func NewService(config Config) (*Service, error) {
@@ -177,7 +178,17 @@ func (service *Service) Refresh(rawToken string) (Pair, error) {
 	return pair, nil
 }
 
+// refreshSweepInterval: pembersihan refresh token kedaluwarsa memindai seluruh map di bawah
+// mutex, jadi tidak boleh dilakukan di setiap request (O(n) per request -> semua request antre
+// dan koneksi menumpuk sampai OOM pada uji 10k VU, P2 M2). Token kedaluwarsa tetap ditolak oleh
+// pengecekan per token di Refresh.
+const refreshSweepInterval = 10 * time.Second
+
 func (service *Service) deleteExpiredRefreshTokens(now time.Time) {
+	if now.Sub(service.lastSweep) < refreshSweepInterval {
+		return
+	}
+	service.lastSweep = now
 	for digest, record := range service.refresh {
 		if !now.Before(record.expires) {
 			delete(service.refresh, digest)
