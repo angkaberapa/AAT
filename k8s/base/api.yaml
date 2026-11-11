@@ -60,7 +60,7 @@ metadata:
   name: bnpb-api
   labels: { app: bnpb-api, role: api }
 spec:
-  replicas: 1
+  replicas: 3 # stateless; beberapa replika supaya client-facing API bukan bottleneck
   selector:
     matchLabels: { app: bnpb-api }
   template:

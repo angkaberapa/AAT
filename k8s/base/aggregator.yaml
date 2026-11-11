@@ -64,7 +64,9 @@ spec:
             failureThreshold: 3
           resources:
             requests: { memory: 256Mi, cpu: 250m }
-            limits: { memory: 512Mi }
+            # CPU limit = ukuran tetap satu instance, supaya menambah instance benar-benar menambah
+            # kapasitas (P2 kriteria 7) dan hasilnya tidak bergantung jumlah core host.
+            limits: { memory: 512Mi, cpu: 500m }
 ---
 apiVersion: v1
 kind: Service
