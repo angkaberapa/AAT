@@ -37,6 +37,7 @@ type StatusTracker struct {
 	now        func() time.Time
 	states     map[domain.Source]*sourceState
 	order      []domain.Source
+	onChange   func(Record) // P2 M2: dipanggil (di luar lock) tiap kali status satu sumber berubah
 }
 
 type sourceState struct {
@@ -64,15 +65,18 @@ func NewStatusTracker(sources []domain.Source, staleAfter time.Duration) *Status
 
 func (t *StatusTracker) RecordSuccess(source domain.Source) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	st := t.state(source)
 	st.lastSuccess = t.now().UTC()
 	st.failingSince = time.Time{}
+	rec, notify := st.record(source), t.onChange
+	t.mu.Unlock()
+	if notify != nil {
+		notify(rec)
+	}
 }
 
 func (t *StatusTracker) RecordFailure(source domain.Source, err error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	st := t.state(source)
 	now := t.now().UTC()
 	st.lastError = now
@@ -80,6 +84,66 @@ func (t *StatusTracker) RecordFailure(source domain.Source, err error) {
 	if st.failingSince.IsZero() {
 		st.failingSince = now
 	}
+	rec, notify := st.record(source), t.onChange
+	t.mu.Unlock()
+	if notify != nil {
+		notify(rec)
+	}
+}
+
+// Dengan ≥3 instance hanya leader yang polling, jadi status mentah tiap sumber disimpan di
+// storage (lewat OnChange) dan dibaca semua instance (SharedStatus). Leader baru memulihkan
+// status terakhir (Restore) supaya stale_since tidak ter-reset saat failover.
+
+// Record = keadaan mentah poll satu sumber, cukup untuk menghitung ulang SourceStatus.
+type Record struct {
+	Source       domain.Source
+	LastSuccess  time.Time
+	LastError    time.Time
+	LastErrorMsg string
+	FailingSince time.Time
+}
+
+func (st *sourceState) record(source domain.Source) Record {
+	return Record{
+		Source:       source,
+		LastSuccess:  st.lastSuccess,
+		LastError:    st.lastError,
+		LastErrorMsg: st.lastErrorMsg,
+		FailingSince: st.failingSince,
+	}
+}
+
+// OnChange memasang fn yang dipanggil setiap RecordSuccess/RecordFailure.
+func (t *StatusTracker) OnChange(fn func(Record)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onChange = fn
+}
+
+// Restore memuat status yang tersimpan (dari leader sebelumnya). Tidak memanggil OnChange.
+func (t *StatusTracker) Restore(records []Record) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, r := range records {
+		st := t.state(r.Source)
+		st.lastSuccess = r.LastSuccess
+		st.lastError = r.LastError
+		st.lastErrorMsg = r.LastErrorMsg
+		st.failingSince = r.FailingSince
+	}
+}
+
+// Describe menghitung SourceStatus dari Record pada waktu now (aturan sama dengan tracker).
+func Describe(r Record, staleAfter time.Duration, now time.Time) SourceStatus {
+	t := StatusTracker{staleAfter: staleAfter}
+	st := sourceState{
+		lastSuccess:  r.LastSuccess,
+		lastError:    r.LastError,
+		lastErrorMsg: r.LastErrorMsg,
+		failingSince: r.FailingSince,
+	}
+	return t.describe(r.Source, &st, now)
 }
 
 // Status returns the current status of one source.

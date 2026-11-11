@@ -1,0 +1,115 @@
+# Consumer Kafka (role=consumer). State file disimpan di PVC agar offset/dedupe bertahan saat
+# pod pindah; strategy Recreate karena PVC ReadWriteOnce hanya boleh dipasang satu pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bnpb-consumer-dashboard-data
+  labels: { app: bnpb-consumer-dashboard, role: consumer }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 100Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-consumer-dashboard
+  labels: { app: bnpb-consumer-dashboard, role: consumer }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bnpb-consumer-dashboard }
+  template:
+    metadata:
+      labels: { app: bnpb-consumer-dashboard, role: consumer }
+    spec:
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532 }
+      containers:
+        - name: bnpb-consumer-dashboard
+          image: aat/bnpb-consumer-dashboard:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-consumer-dashboard-config } }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bnpb-consumer-dashboard-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-consumer-dashboard
+  labels: { app: bnpb-consumer-dashboard, role: consumer }
+spec:
+  type: LoadBalancer
+  selector: { app: bnpb-consumer-dashboard }
+  ports: [{ name: http, port: 8091, targetPort: http }]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bnpb-consumer-notifier-data
+  labels: { app: bnpb-consumer-notifier, role: consumer }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 100Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-consumer-notifier
+  labels: { app: bnpb-consumer-notifier, role: consumer }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bnpb-consumer-notifier }
+  template:
+    metadata:
+      labels: { app: bnpb-consumer-notifier, role: consumer }
+    spec:
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532 }
+      containers:
+        - name: bnpb-consumer-notifier
+          image: aat/bnpb-consumer-notifier:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-consumer-notifier-config } }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bnpb-consumer-notifier-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-consumer-notifier
+  labels: { app: bnpb-consumer-notifier, role: consumer }
+spec:
+  type: LoadBalancer
+  selector: { app: bnpb-consumer-notifier }
+  ports: [{ name: http, port: 8092, targetPort: http }]

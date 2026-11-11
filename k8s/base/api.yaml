@@ -1,0 +1,95 @@
+# bnpb-auth & bnpb-api (role=api, kelas "Auth dan Client-Facing API" di Lampiran B).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-auth
+  labels: { app: bnpb-auth, role: api }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bnpb-auth }
+  template:
+    metadata:
+      labels: { app: bnpb-auth, role: api }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: bnpb-auth
+          image: aat/bnpb-auth:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-auth-config } }]
+          env:
+            - name: JWT_SIGNING_KEY
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: JWT_SIGNING_KEY } }
+            - name: CLIENT_MEDIA_ID
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_MEDIA_ID } }
+            - name: CLIENT_MEDIA_SECRET
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_MEDIA_SECRET } }
+            - name: CLIENT_FIELD_ID
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_FIELD_ID } }
+            - name: CLIENT_FIELD_SECRET
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_FIELD_SECRET } }
+            - name: CLIENT_OPS_ID
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_OPS_ID } }
+            - name: CLIENT_OPS_SECRET
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: CLIENT_OPS_SECRET } }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-auth
+  labels: { app: bnpb-auth, role: api }
+spec:
+  type: LoadBalancer
+  selector: { app: bnpb-auth }
+  ports: [{ name: http, port: 8090, targetPort: http }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-api
+  labels: { app: bnpb-api, role: api }
+spec:
+  replicas: 3 # stateless; beberapa replika supaya client-facing API bukan bottleneck
+  selector:
+    matchLabels: { app: bnpb-api }
+  template:
+    metadata:
+      labels: { app: bnpb-api, role: api }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: bnpb-api
+          image: aat/bnpb-api:dev
+          ports: [{ containerPort: 8080, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-api-config } }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 250m }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-api
+  labels: { app: bnpb-api, role: api }
+spec:
+  type: LoadBalancer
+  selector: { app: bnpb-api }
+  ports: [{ name: http, port: 8080, targetPort: http }]

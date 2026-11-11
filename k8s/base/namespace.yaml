@@ -1,0 +1,5 @@
+# Semua komponen BNPB wajib di namespace ini (Ketentuan Tester Agent no. 6).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sistem-informasi-kebencanaan-bnpb

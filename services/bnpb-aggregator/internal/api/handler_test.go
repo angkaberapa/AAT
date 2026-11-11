@@ -139,3 +139,22 @@ func TestListSetsStaleHeader(t *testing.T) {
 		t.Fatalf("X-Data-Stale = %q", rec.Header().Get(HeaderDataStale))
 	}
 }
+func TestM2HazardTypesAccepted(t *testing.T) {
+	mux := newTestMux(&fakeReader{})
+
+	rec, body := get(t, mux, "/hazards?hazard_type=WILDFIRE")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("WILDFIRE status = %d", rec.Code)
+	}
+	sources := body["meta"].(map[string]any)["sources"].(map[string]any)
+	if _, ok := sources["SATELIT"]; !ok || len(sources) != 1 {
+		t.Fatalf("WILDFIRE meta sources = %v, want only SATELIT", sources)
+	}
+
+	if rec, _ := get(t, mux, "/hazards?source=SENSOR_PANTAI"); rec.Code != http.StatusOK {
+		t.Fatalf("SENSOR_PANTAI status = %d", rec.Code)
+	}
+	if rec, _ := get(t, mux, "/hazards?hazard_type=FLOOD"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("FLOOD status = %d, want 400", rec.Code)
+	}
+}

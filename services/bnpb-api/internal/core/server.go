@@ -35,6 +35,10 @@ func Serve(ctx context.Context, logger *slog.Logger, port int, handler http.Hand
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           withObservability(logger, handler),
 		ReadHeaderTimeout: 5 * time.Second,
+		// Tanpa ini koneksi keep-alive yang diam tidak pernah ditutup: tiap koneksi memegang
+		// goroutine + buffer, dan 10k client yang jarang memanggil (mis. ambil token) membuat pod
+		// OOMKilled (P2 M2 uji 10k VU).
+		IdleTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

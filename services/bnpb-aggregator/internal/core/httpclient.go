@@ -20,8 +20,9 @@ const (
 // HTTPClient forwards the correlation ID and logs the latency of every outbound
 // call. Use it instead of http.DefaultClient.
 type HTTPClient struct {
-	client *http.Client
-	logger *slog.Logger
+	client  *http.Client
+	logger  *slog.Logger
+	headers http.Header // dipasang di setiap request keluar (mis. X-Instance-ID)
 }
 
 func NewHTTPClient(logger *slog.Logger, timeout time.Duration) *HTTPClient {
@@ -44,11 +45,24 @@ func (b drainOnClose) Close() error {
 	return b.ReadCloser.Close()
 }
 
+// SetHeader menambahkan header tetap ke setiap request keluar. Panggil sebelum client dipakai.
+// Dipakai aggregator untuk X-Instance-ID (nama pod), supaya log upstream menunjukkan instance
+// mana yang memanggil (P2 M2 kriteria 2).
+func (c *HTTPClient) SetHeader(key, value string) {
+	if c.headers == nil {
+		c.headers = http.Header{}
+	}
+	c.headers.Set(key, value)
+}
+
 // Do sends req. `target` is a short label for logs, e.g. "bmkg" or "aggregator".
 // The correlation ID is taken from req.Context().
 func (c *HTTPClient) Do(req *http.Request, target string) (*http.Response, error) {
 	ctx := req.Context()
 	req.Header.Set(CorrelationHeader, CorrelationID(ctx))
+	for key, values := range c.headers {
+		req.Header[key] = values
+	}
 
 	start := time.Now()
 	resp, err := c.client.Do(req)

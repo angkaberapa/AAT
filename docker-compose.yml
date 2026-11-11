@@ -51,7 +51,7 @@ services:
       SOURCE_STALE_AFTER_SECONDS: ${SOURCE_STALE_AFTER_SECONDS:-15}
       SNAPSHOT_DEFAULT_LIMIT: ${SNAPSHOT_DEFAULT_LIMIT:-200}
       SNAPSHOT_MAX_LIMIT: ${SNAPSHOT_MAX_LIMIT:-1000}
-      MONGO_URI: mongodb://${MONGO_ROOT_USER:?}:${MONGO_ROOT_PASSWORD:?}@mongo:27017/?authSource=admin
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:?}:${MONGO_ROOT_PASSWORD:?}@mongo:27017/?authSource=admin&directConnection=true
       MONGO_DB: ${MONGO_DB:-bnpb}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
@@ -59,6 +59,8 @@ services:
       KAFKA_TOPIC_RETENTION_HOURS: ${KAFKA_TOPIC_RETENTION_HOURS:-168}
       OUTBOX_RELAY_INTERVAL_MS: ${OUTBOX_RELAY_INTERVAL_MS:-1000}
       OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+      # Leader election butuh Kubernetes (Lease); di compose satu instance selalu jadi leader.
+      LEADER_ELECTION_ENABLED: "false"
     depends_on:
       mongo: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -161,13 +163,23 @@ services:
   mongo:
     image: mongo:7
     restart: unless-stopped
+    # Replica set satu anggota (sama dengan k8s/base/mongo.yaml): fencing P2 butuh transaksi.
+    # Replica set + auth wajib punya keyFile; dibuat acak tiap start (cukup untuk satu anggota).
+    entrypoint:
+      - bash
+      - -c
+      - |
+        head -c 756 /dev/urandom | base64 > /tmp/mongo-keyfile
+        chown 999:999 /tmp/mongo-keyfile && chmod 400 /tmp/mongo-keyfile
+        exec docker-entrypoint.sh mongod --replSet rs0 --keyFile /tmp/mongo-keyfile --bind_ip_all
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:?set MONGO_ROOT_USER in .env}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      # Sekaligus inisialisasi replica set (idempoten); sehat = sudah PRIMARY.
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'try { rs.status() } catch (e) { rs.initiate({_id: \"rs0\", members: [{_id: 0, host: \"localhost:27017\"}]}) }; quit(db.hello().isWritablePrimary ? 0 : 1)'"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -51,7 +51,7 @@ function storeSession(res) {
 function issue(client) {
   const res = http.post(`${AUTH}/token`,
     JSON.stringify({ client_id: client.id, client_secret: client.secret }),
-    { headers: JSON_HEADERS, tags: { name: 'auth' } });
+    { headers: JSON_HEADERS, tags: { name: 'auth' }, responseType: 'text' });
   if (res.status !== 200) {
     throw new Error(`token request for ${client.id} failed: HTTP ${res.status}`);
   }
@@ -61,7 +61,7 @@ function issue(client) {
 function refresh(current, client) {
   const res = http.post(`${AUTH}/token/refresh`,
     JSON.stringify({ refresh_token: current.refresh }),
-    { headers: JSON_HEADERS, tags: { name: 'auth' } });
+    { headers: JSON_HEADERS, tags: { name: 'auth' }, responseType: 'text' });
   return res.status === 200 ? storeSession(res) : issue(client);
 }
 
