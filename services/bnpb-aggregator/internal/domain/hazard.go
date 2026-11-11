@@ -13,14 +13,47 @@ type Source string
 const (
 	SourceBMKG  Source = "BMKG"
 	SourcePVMBG Source = "PVMBG"
+	SourceSatelit Source = "SATELIT"       
+	SourceSensorPantai Source = "SENSOR_PANTAI"
 )
+
+var Sources = []Source{SourceBMKG, SourcePVMBG, SourceSatelit, SourceSensorPantai}
+
+func (s Source) Valid() bool {
+	for _, known := range Sources {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
 
 type HazardType string
 
 const (
 	HazardTypeSeismic  HazardType = "SEISMIC"
 	HazardTypeVolcanic HazardType = "VOLCANIC"
+	HazardTypeWildfire HazardType = "WILDFIRE"
+	HazardTypeCoastal  HazardType = "COASTAL"
 )
+
+var sourceOf = map[HazardType]Source{
+	HazardTypeSeismic:  SourceBMKG,
+	HazardTypeVolcanic: SourcePVMBG,
+	HazardTypeWildfire: SourceSatelit,
+	HazardTypeCoastal:  SourceSensorPantai,
+}
+
+var HazardTypes = []HazardType{HazardTypeSeismic, HazardTypeVolcanic, HazardTypeWildfire, HazardTypeCoastal}
+
+func (h HazardType) Valid() bool {
+	_, ok := sourceOf[h]
+	return ok
+}
+
+func (h HazardType) Source() Source {
+	return sourceOf[h]
+}
 
 type Severity string
 
@@ -55,13 +88,13 @@ func (event HazardEvent) Validate() error {
 	if event.HazardID == "" {
 		errs = append(errs, errors.New("hazard_id is required"))
 	}
-	if event.Source != SourceBMKG && event.Source != SourcePVMBG {
+	if !event.Source.Valid() {
 		errs = append(errs, fmt.Errorf("unknown source %q", event.Source))
 	}
 	if event.SourceRefID == "" {
 		errs = append(errs, errors.New("source_ref_id is required"))
 	}
-	if event.HazardType != HazardTypeSeismic && event.HazardType != HazardTypeVolcanic {
+	if !event.HazardType.Valid() {
 		errs = append(errs, fmt.Errorf("unknown hazard_type %q", event.HazardType))
 	}
 	if !validSeverity(event.Severity) {

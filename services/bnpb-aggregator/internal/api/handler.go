@@ -62,7 +62,7 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 		}
 
 		//data dari store tetap dilayani walau sumbernya lagi mati; meta.sources ngasih tau seberapa basi datanya.
-		meta := freshnessMeta(statuses, relevantSources(filter))
+		meta := freshnessMeta(statuses, relevantSources(filter, statuses))
 		w.Header().Set(HeaderDataStale, strconv.FormatBool(meta["stale"].(bool)))
 		core.WriteJSON(w, http.StatusOK, map[string]any{"data": events, "meta": meta})
 	})
@@ -106,15 +106,15 @@ func parseFilter(r *http.Request, limits snapshotLimits) (store.Filter, string) 
 
 	if raw := q.Get("source"); raw != "" {
 		f.Source = domain.Source(raw)
-		if f.Source != domain.SourceBMKG && f.Source != domain.SourcePVMBG {
-			return f, "invalid 'source', expected BMKG or PVMBG"
+		if !f.Source.Valid() {
+			return f, "invalid 'source', expected one of " + joinValues(domain.Sources)
 		}
 	}
 
 	if raw := q.Get("hazard_type"); raw != "" {
 		f.HazardType = domain.HazardType(raw)
-		if f.HazardType != domain.HazardTypeSeismic && f.HazardType != domain.HazardTypeVolcanic {
-			return f, "invalid 'hazard_type', expected SEISMIC or VOLCANIC"
+		if !f.HazardType.Valid() {
+			return f, "invalid 'hazard_type', expected one of " + joinValues(domain.HazardTypes)
 		}
 	}
 
@@ -155,18 +155,31 @@ func setFreshnessHeaders(w http.ResponseWriter, st ingest.SourceStatus) {
 	}
 }
 
-// relevantSources = sumber yang datanya bisa muncul di hasil query ini.
-func relevantSources(f store.Filter) []domain.Source {
+// relevantSources = sumber yang datanya bisa muncul di hasil query ini. Tanpa filter, hanya
+// sumber yang dipantau tracker yang dihitung, supaya sumber yang belum di-ingest (mis. SATELIT
+// sebelum P4 jalan) tidak membuat semua respons berstatus stale.
+func relevantSources(f store.Filter, statuses StatusProvider) []domain.Source {
 	switch {
 	case f.Source != "":
 		return []domain.Source{f.Source}
-	case f.HazardType == domain.HazardTypeSeismic:
-		return []domain.Source{domain.SourceBMKG}
-	case f.HazardType == domain.HazardTypeVolcanic:
-		return []domain.Source{domain.SourcePVMBG}
+	case f.HazardType != "":
+		return []domain.Source{f.HazardType.Source()}
 	default:
-		return []domain.Source{domain.SourceBMKG, domain.SourcePVMBG}
+		snapshot := statuses.Snapshot()
+		out := make([]domain.Source, 0, len(snapshot))
+		for _, st := range snapshot {
+			out = append(out, st.Source)
+		}
+		return out
 	}
+}
+
+func joinValues[T ~string](values []T) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = string(v)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // publicStatus = SourceStatus tanpa detail error internal. meta ikut diteruskan ke semua client
