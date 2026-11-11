@@ -1,0 +1,92 @@
+# Konfigurasi non-rahasia, satu ConfigMap per service supaya tiap pod hanya menerima nilainya
+# sendiri (nama kunci seperti UPSTREAM_TIMEOUT_MS berbeda nilai antar service).
+# Kredensial ada di Secret `bnpb-secrets` yang dibuat scripts/deploy.sh dari .env (tidak di-commit).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bmkg-mock-config
+data:
+  LOG_LEVEL: INFO
+  RESPONSE_DELAY_MS: "100"
+  NEW_EVENT_INTERVAL_SECONDS: "10"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pvmbg-mock-config
+data:
+  LOG_LEVEL: INFO
+  RESPONSE_DELAY_MIN_MS: "500"
+  RESPONSE_DELAY_MAX_MS: "3000"
+  NEW_EVENT_INTERVAL_SECONDS: "10"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-aggregator-config
+data:
+  LOG_LEVEL: INFO
+  BMKG_BASE_URL: http://bmkg-mock:8081
+  PVMBG_BASE_URL: http://pvmbg-mock:8082
+  POLL_INTERVAL_SECONDS: "3"
+  UPSTREAM_TIMEOUT_MS: "5000"
+  SOURCE_STALE_AFTER_SECONDS: "15"
+  SNAPSHOT_DEFAULT_LIMIT: "200"
+  SNAPSHOT_MAX_LIMIT: "1000"
+  MONGO_HOST: mongo:27017
+  MONGO_DB: bnpb
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_HAZARD_TOPIC: hazard-events
+  KAFKA_TOPIC_PARTITIONS: "3"
+  KAFKA_TOPIC_RETENTION_HOURS: "168"
+  OUTBOX_RELAY_INTERVAL_MS: "1000"
+  OUTBOX_BATCH_SIZE: "100"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-auth-config
+data:
+  LOG_LEVEL: INFO
+  JWT_ISSUER: bnpb-auth
+  JWT_AUDIENCE: bnpb-api
+  ACCESS_TOKEN_TTL_SECONDS: "60"
+  REFRESH_TOKEN_TTL_SECONDS: "3600"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-api-config
+data:
+  LOG_LEVEL: INFO
+  AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+  AUTH_BASE_URL: http://bnpb-auth:8090
+  JWT_ISSUER: bnpb-auth
+  JWT_AUDIENCE: bnpb-api
+  JWKS_CACHE_TTL_SECONDS: "300"
+  UPSTREAM_TIMEOUT_MS: "2000"
+  MAX_CONCURRENT_REQUESTS: "128"
+  RATE_LIMIT_RPS: "300"
+  RATE_LIMIT_BURST: "600"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-consumer-dashboard-config
+data:
+  LOG_LEVEL: INFO
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_HAZARD_TOPIC: hazard-events
+  KAFKA_GROUP_ID: dashboard-updater
+  PROCESSING_DELAY_MS: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-consumer-notifier-config
+data:
+  LOG_LEVEL: INFO
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_HAZARD_TOPIC: hazard-events
+  KAFKA_GROUP_ID: notifier
+  PROCESSING_DELAY_MS: "0"

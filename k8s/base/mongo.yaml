@@ -1,0 +1,71 @@
+# Canonical Store (role=store). PLACEHOLDER satu instance: topologi sharding/replikasi P1
+# menggantikan file ini. Data di local-path (hostPath di node), sesuai Ketentuan Tester Agent no. 7.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  labels: { app: mongo, role: store }
+spec:
+  serviceName: mongo
+  replicas: 1
+  selector:
+    matchLabels: { app: mongo }
+  template:
+    metadata:
+      labels: { app: mongo, role: store }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: mongo
+          image: mongo:7
+          # Cache WiredTiger dibatasi supaya muat di limit 1Gi (bawaannya 50% RAM node).
+          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          ports: [{ containerPort: 27017, name: mongo }]
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+          volumeMounts: [{ name: data, mountPath: /data/db }]
+          readinessProbe:
+            exec: { command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 512Mi, cpu: 100m }
+            limits: { memory: 1Gi }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests: { storage: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  labels: { app: mongo, role: store }
+spec:
+  selector: { app: mongo }
+  ports: [{ name: mongo, port: 27017, targetPort: mongo }]
+---
+# "Storage dimiliki tepat satu service" ditegakkan platform (Ketentuan Implementasi no. 8):
+# hanya pod role=aggregator yang boleh membuka koneksi ke pod role=store.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: store-only-from-aggregator
+spec:
+  podSelector:
+    matchLabels: { role: store }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { role: aggregator }
