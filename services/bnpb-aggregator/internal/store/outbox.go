@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -83,20 +84,39 @@ func ContentHash(e domain.HazardEvent) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// Save upserts e by (source, source_ref_id) in a single atomic operation:
+// save upserts e by (source, source_ref_id). Dipanggil di dalam transaksi ter-fence (SaveBatch).
 //   - new event        -> inserted, outbox.version 1, pending
 //   - changed content  -> event fields updated (ingested_at kept, R4), version + 1, pending
 //   - same content     -> nothing written, version unchanged, not published
 //
-// "Same content" is detected inside the same operation: the filter only matches a stored
-// document whose content_hash differs. When the hash is equal the filter matches nothing,
-// so the upsert tries to insert a second document with the same (source, source_ref_id)
-// and the unique index rejects it with a duplicate key error, which means Unchanged.
-func (s *Store) Save(ctx context.Context, e domain.HazardEvent) (SaveResult, error) {
+// M2: versi M1 mendeteksi "isi sama" lewat duplicate key
+// error dari upsert, tetapi di dalam transaksi error itu membatalkan seluruh transaksi. Sekarang
+// hash dibaca dulu; di dalam transaksi baca + tulis ini tetap atomik (snapshot + write conflict).
+func (s *Store) save(ctx context.Context, e domain.HazardEvent) (SaveResult, error) {
 	hash, err := ContentHash(e)
 	if err != nil {
 		return "", err
 	}
+	key := bson.D{
+		{Key: "source", Value: e.Source},
+		{Key: "source_ref_id", Value: e.SourceRefID},
+	}
+
+	var existing struct {
+		Outbox struct {
+			ContentHash string `bson:"content_hash"`
+		} `bson:"outbox"`
+	}
+	err = s.events.FindOne(ctx, key,
+		options.FindOne().SetProjection(bson.D{{Key: "outbox.content_hash", Value: 1}})).Decode(&existing)
+	found := err == nil
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return "", fmt.Errorf("read hazard event %s/%s: %w", e.Source, e.SourceRefID, err)
+	}
+	if found && existing.Outbox.ContentHash == hash {
+		return Unchanged, nil
+	}
+
 	fields, err := toDocument(e)
 	if err != nil {
 		return "", err
@@ -107,27 +127,18 @@ func (s *Store) Save(ctx context.Context, e domain.HazardEvent) (SaveResult, err
 	fields["outbox.correlation_id"] = core.CorrelationID(ctx)
 	fields["outbox.changed_at"] = time.Now().UTC()
 
-	filter := bson.D{
-		{Key: "source", Value: e.Source},
-		{Key: "source_ref_id", Value: e.SourceRefID},
-		{Key: "outbox.content_hash", Value: bson.D{{Key: "$ne", Value: hash}}},
-	}
 	update := bson.D{
 		{Key: "$set", Value: fields},
 		{Key: "$inc", Value: bson.D{{Key: "outbox.version", Value: 1}}},
 		{Key: "$setOnInsert", Value: bson.D{{Key: "ingested_at", Value: e.IngestedAt}}},
 	}
-	res, err := s.events.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
-	if mongo.IsDuplicateKeyError(err) {
-		return Unchanged, nil
-	}
-	if err != nil {
+	if _, err := s.events.UpdateOne(ctx, key, update, options.UpdateOne().SetUpsert(true)); err != nil {
 		return "", fmt.Errorf("save hazard event %s/%s: %w", e.Source, e.SourceRefID, err)
 	}
-	if res.UpsertedCount == 1 {
-		return Inserted, nil
+	if found {
+		return Updated, nil
 	}
-	return Updated, nil
+	return Inserted, nil
 }
 
 func toDocument(e domain.HazardEvent) (bson.M, error) {

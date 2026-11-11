@@ -1,13 +1,14 @@
 # BNPB Aggregator (role=aggregator). Service ClusterIP = titik masuk tunggal; hanya pod yang lolos
 # readinessProbe yang menerima trafik (P2 kriteria 1).
-# replicas sementara 1: tanpa leader election (P2 fase 2) tiap instance akan ikut polling.
+# 3 replika: semua melayani API baca, hanya pemegang Lease `bnpb-aggregator-ingest` yang polling
+# dan menjalankan relay outbox (P2 kriteria 2-5).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bnpb-aggregator
   labels: { app: bnpb-aggregator, role: aggregator }
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels: { app: bnpb-aggregator }
   strategy:
@@ -17,7 +18,10 @@ spec:
     metadata:
       labels: { app: bnpb-aggregator, role: aggregator }
     spec:
+      serviceAccountName: bnpb-aggregator
       enableServiceLinks: false
+      # preStop (5 s) + drain HTTP + lepas Lease harus muat di sini (P2 kriteria 8).
+      terminationGracePeriodSeconds: 30
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -32,6 +36,8 @@ spec:
           env:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: BMKG_API_KEY
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: BMKG_API_KEY } }
             - name: PVMBG_TOKEN
@@ -42,7 +48,12 @@ spec:
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
             # $(VAR) diekspansi kubelet dari env di atas (MONGO_HOST dari ConfigMap via envFrom).
             - name: MONGO_URI
-              value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@$(MONGO_HOST)/?authSource=admin
+              value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@$(MONGO_HOST)/?authSource=admin&directConnection=true
+          lifecycle:
+            # Beri waktu Service/kube-proxy mencabut pod ini dari endpoint sebelum SIGTERM, supaya
+            # tidak ada request baru yang jatuh ke pod yang sedang berhenti (rolling update).
+            preStop:
+              sleep: { seconds: 5 }
           readinessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 3
@@ -63,3 +74,44 @@ metadata:
 spec:
   selector: { app: bnpb-aggregator }
   ports: [{ name: http, port: 8000, targetPort: http }]
+---
+# Pada setiap gangguan sukarela (drain node, rolling update) minimal 2 instance tetap melayani.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bnpb-aggregator
+  labels: { app: bnpb-aggregator, role: aggregator }
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: bnpb-aggregator }
+---
+# Identitas aggregator di Kubernetes: hanya boleh mengelola Lease di namespace ini (leader election).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bnpb-aggregator
+  labels: { app: bnpb-aggregator, role: aggregator }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bnpb-aggregator-leader-election
+  labels: { app: bnpb-aggregator, role: aggregator }
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bnpb-aggregator-leader-election
+  labels: { app: bnpb-aggregator, role: aggregator }
+subjects:
+  - kind: ServiceAccount
+    name: bnpb-aggregator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bnpb-aggregator-leader-election

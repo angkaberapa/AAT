@@ -22,8 +22,10 @@ const (
 )
 
 type Store struct {
-	client *mongo.Client
-	events *mongo.Collection
+	client     *mongo.Client
+	events     *mongo.Collection
+	leadership *mongo.Collection // P2 M2: dokumen fence (epoch leader)
+	statuses   *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
 }
 const serverSelectionTimeout = 3 * time.Second
 
@@ -65,7 +67,13 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 		return nil, fmt.Errorf("create indexes: %w", err)
 	}
 
-	return &Store{client: client, events: events}, nil
+	db := client.Database(database)
+	return &Store{
+		client:     client,
+		events:     events,
+		leadership: db.Collection(leadershipCollection),
+		statuses:   db.Collection(sourceStatusCollect),
+	}, nil
 }
 
 func latencyMonitor(logger *slog.Logger) *event.CommandMonitor {

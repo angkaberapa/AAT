@@ -3,6 +3,7 @@
 package config
 
 import (
+	"os"
 	"time"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
@@ -41,6 +42,15 @@ type Config struct {
 	//P2
 	SnapshotDefaultLimit int
 	SnapshotMaxLimit     int
+
+	// P2 M2: leader election (Lease Kubernetes) + identitas instance.
+	LeaderElection     bool
+	LeaseName          string
+	PodNamespace       string
+	InstanceID         string // nama pod; dikirim ke upstream sebagai X-Instance-ID
+	LeaseDuration      time.Duration
+	LeaseRenewDeadline time.Duration
+	LeaseRetryPeriod   time.Duration
 }
 
 func Load() (Config, error) {
@@ -76,5 +86,17 @@ func Load() (Config, error) {
 	e.Check(c.SnapshotDefaultLimit >= 1, "SNAPSHOT_DEFAULT_LIMIT must be at least 1")
 	e.Check(c.SnapshotDefaultLimit <= c.SnapshotMaxLimit, "SNAPSHOT_DEFAULT_LIMIT must not exceed SNAPSHOT_MAX_LIMIT")
 	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
+
+	c.LeaderElection = e.String("LEADER_ELECTION_ENABLED", "false") == "true"
+	c.LeaseName = e.String("LEADER_LEASE_NAME", "bnpb-aggregator-ingest")
+	c.PodNamespace = e.String("POD_NAMESPACE", "")
+	hostname, _ := os.Hostname()
+	c.InstanceID = e.String("POD_NAME", hostname)
+	c.LeaseDuration = e.Seconds("LEASE_DURATION_SECONDS", 15*time.Second)
+	c.LeaseRenewDeadline = e.Seconds("LEASE_RENEW_DEADLINE_SECONDS", 10*time.Second)
+	c.LeaseRetryPeriod = e.Seconds("LEASE_RETRY_PERIOD_SECONDS", 2*time.Second)
+	e.Check(!c.LeaderElection || c.PodNamespace != "", "POD_NAMESPACE is required when LEADER_ELECTION_ENABLED=true")
+	e.Check(c.LeaseRenewDeadline < c.LeaseDuration, "LEASE_RENEW_DEADLINE_SECONDS must be less than LEASE_DURATION_SECONDS")
+	e.Check(c.LeaseRetryPeriod < c.LeaseRenewDeadline, "LEASE_RETRY_PERIOD_SECONDS must be less than LEASE_RENEW_DEADLINE_SECONDS")
 	return c, e.Err()
 }
