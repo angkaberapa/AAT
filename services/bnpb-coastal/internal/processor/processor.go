@@ -253,9 +253,19 @@ func (p *Processor) flushOutbox(ctx context.Context, logger *slog.Logger) {
 				"producer_event_id", item.ProducerEventID, "attempt", item.Attempts+1,
 				"retry_in", next.Sub(time.Now()).Round(time.Second).String(), "error", err.Error())
 			if !ingest.IsRetryable(err) {
-				// Terminal 4xx: keep the row for inspection but do not hammer the
-				// Aggregator. The next slice will forward it to unprocessed.
-				return
+				if apiErr, stop := terminalConfigError(err); stop {
+					logger.ErrorContext(ctx, "ingest rejected the service configuration, stopping outbox",
+						"status", apiErr.StatusCode, "code", apiErr.Code, "error", err.Error())
+					return
+				}
+				if parkErr := p.parkOutbox(ctx, item, err); parkErr != nil {
+					logger.ErrorContext(ctx, "park rejected outbox item failed",
+						"producer_event_id", item.ProducerEventID, "error", parkErr.Error())
+					return
+				}
+				logger.WarnContext(ctx, "outbox item parked to unprocessed",
+					"producer_event_id", item.ProducerEventID, "reason", err.Error())
+				continue
 			}
 		}
 	}
@@ -280,6 +290,33 @@ func (p *Processor) sendOutboxItem(ctx context.Context, item store.OutboxItem) e
 	default:
 		return fmt.Errorf("unknown outbox operation %q", item.Operation)
 	}
+}
+
+func terminalConfigError(err error) (*ingest.APIError, bool) {
+	var apiErr *ingest.APIError
+	if !errors.As(err, &apiErr) {
+		return nil, false
+	}
+	switch apiErr.StatusCode {
+	case 400, 401, 403, 404:
+		return apiErr, true
+	default:
+		return apiErr, false
+	}
+}
+
+func (p *Processor) parkOutbox(ctx context.Context, item store.OutboxItem, cause error) error {
+	reason := "ingest_rejected: " + cause.Error()
+	return p.store.ParkOutboxWithQuarantine(ctx, item.ID, reason, store.QuarantineItem{
+		MessageID:        "coastal-ingest-" + item.ProducerEventID,
+		SourcePosition:   item.SourcePosition,
+		ReceivedAt:       time.Now().UTC(),
+		Reason:           reason,
+		Retryable:        false,
+		Status:           ingest.StatusParked,
+		RawPayloadBase64: base64.StdEncoding.EncodeToString(item.Payload),
+		ContentType:      "application/json",
+	})
 }
 
 func (p *Processor) flushQuarantine(ctx context.Context, logger *slog.Logger) {
