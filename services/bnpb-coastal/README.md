@@ -69,6 +69,21 @@ go test -race ./...
 go vet ./...
 ```
 
+## Batasan saat ini
+
+- Circuit breaker, metrics Prometheus, dan manifest Kubernetes belum ada.
+- Jika Aggregator mengembalikan `4xx` terminal, outbox tidak dianggap terkirim
+  dan cursor berhenti. Slice berikutnya akan memindahkan command itu ke
+  `unprocessed` agar pipeline tidak macet.
+- Station table dan mapping severity masih provisional sampai kontrak resmi
+  Sensor Pantai tersedia.
+
+## Deklarasi AI
+
+Kode service ini ditulis dengan bantuan LLM (OpenCode, DeepSeek V4.1 Flash)
+untuk Milestone 2 IF4031. Keputusan desain, kontrak, dan hasil uji ditinjau
+oleh anggota kelompok.
+
 ## Catatan
 
 - Module ini memakai Go 1.26 karena `modernc.org/sqlite`. Dockerfile memakai

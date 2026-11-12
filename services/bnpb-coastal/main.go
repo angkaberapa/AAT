@@ -1,3 +1,6 @@
+// P5 coastal ingestion service. Ditulis dengan bantuan LLM (OpenCode,
+// DeepSeek V4.1 Flash) untuk Milestone 2 IF4031. Keputusan desain dan hasil
+// uji ditinjau oleh anggota kelompok.
 package main
 
 import (
