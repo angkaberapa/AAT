@@ -31,6 +31,7 @@ type Client struct {
 	ID     string
 	Secret string
 	Scope  string
+	Role   string
 }
 
 type Config struct {
@@ -44,6 +45,7 @@ type Config struct {
 
 type Claims struct {
 	Scope     string `json:"scope"`
+	Role      string `json:"role"`
 	TokenType string `json:"token_type"`
 	jwt.RegisteredClaims
 }
@@ -59,6 +61,7 @@ type Pair struct {
 type refreshRecord struct {
 	clientID string
 	scope    string
+	role     string
 	expires  time.Time
 }
 
@@ -66,6 +69,13 @@ type storedClient struct {
 	id           string
 	secretDigest [sha256.Size]byte
 	scope        string
+	role         string
+}
+
+var validRoles = map[string]struct{}{
+	"media": {},
+	"field": {},
+	"ops":   {},
 }
 
 type Service struct {
@@ -105,6 +115,9 @@ func NewService(config Config) (*Service, error) {
 		if strings.TrimSpace(client.ID) == "" || strings.TrimSpace(client.Secret) == "" || strings.TrimSpace(client.Scope) == "" {
 			return nil, errors.New("client ID, secret, and scope are required")
 		}
+		if _, valid := validRoles[client.Role]; !valid {
+			return nil, fmt.Errorf("client %q has unknown role %q", client.ID, client.Role)
+		}
 		if _, exists := clients[client.ID]; exists {
 			return nil, fmt.Errorf("duplicate client ID %q", client.ID)
 		}
@@ -113,7 +126,7 @@ func NewService(config Config) (*Service, error) {
 			return nil, errors.New("downstream client secrets must be distinct")
 		}
 		secretDigests[digest] = struct{}{}
-		clients[client.ID] = storedClient{id: client.ID, secretDigest: digest, scope: client.Scope}
+		clients[client.ID] = storedClient{id: client.ID, secretDigest: digest, scope: client.Scope, role: client.Role}
 	}
 	if len(clients) != 3 {
 		return nil, fmt.Errorf("exactly three downstream client identities are required, got %d", len(clients))
@@ -149,7 +162,7 @@ func (service *Service) Issue(clientID, clientSecret string) (Pair, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	service.deleteExpiredRefreshTokens(service.now().UTC())
-	return service.issuePair(client.id, client.scope)
+	return service.issuePair(client.id, client.scope, client.role)
 }
 
 func (service *Service) Refresh(rawToken string) (Pair, error) {
@@ -170,7 +183,7 @@ func (service *Service) Refresh(rawToken string) (Pair, error) {
 		return Pair{}, ErrInvalidRefreshToken
 	}
 
-	pair, err := service.issuePair(record.clientID, record.scope)
+	pair, err := service.issuePair(record.clientID, record.scope, record.role)
 	if err != nil {
 		return Pair{}, err
 	}
@@ -196,7 +209,7 @@ func (service *Service) deleteExpiredRefreshTokens(now time.Time) {
 	}
 }
 
-func (service *Service) issuePair(clientID, scope string) (Pair, error) {
+func (service *Service) issuePair(clientID, scope, role string) (Pair, error) {
 	now := service.now().UTC()
 	jti, err := randomString(service.random, 16)
 	if err != nil {
@@ -204,6 +217,7 @@ func (service *Service) issuePair(clientID, scope string) (Pair, error) {
 	}
 	claims := Claims{
 		Scope:     scope,
+		Role:      role,
 		TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    service.issuer,
@@ -229,6 +243,7 @@ func (service *Service) issuePair(clientID, scope string) (Pair, error) {
 	service.refresh[sha256.Sum256([]byte(refreshToken))] = refreshRecord{
 		clientID: clientID,
 		scope:    scope,
+		role:     role,
 		expires:  now.Add(service.refreshTTL),
 	}
 
