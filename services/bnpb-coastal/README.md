@@ -1,7 +1,8 @@
 # bnpb-coastal
 
-Service P5 untuk Milestone 2. Saat ini baru berisi client Internal Ingest API
-dan fake Aggregator. Belum ada poller sensor, SQLite, atau circuit breaker.
+Service P5 untuk Milestone 2. Saat ini berisi client Internal Ingest API,
+fake Aggregator, dan SQLite state/outbox. Belum ada poller sensor atau circuit
+breaker.
 
 Kontrak integrasi: `docs/KONTRAK_INTERNAL_INGEST.md`.
 Rencana kerja: `docs/M2_P4_P5_PLAN.md`.
@@ -9,6 +10,7 @@ Rencana kerja: `docs/M2_P4_P5_PLAN.md`.
 ## Isi
 
 - `internal/ingest`: DTO, `Client` interface, HTTP client, klasifikasi error.
+- `internal/store`: SQLite schema, cursor, observations, outbox, quarantine, cache.
 - `internal/core`: correlation ID, logger, env, HTTP server. Salinan dari service lain.
 - `cmd/fake-aggregator`: fake Aggregator untuk development dan test.
 
@@ -37,6 +39,8 @@ go vet ./...
 
 ## Catatan
 
+- Module ini memakai Go 1.26 karena `modernc.org/sqlite`. Dockerfile memakai
+  `golang:1.27-alpine` seperti service lain.
 - Module ini belum masuk `go.work`. Tambahkan setelah koordinasi dengan platform.
 - Tidak ada akses langsung ke MongoDB. Semua tulisan lewat Internal Ingest API.
 - `hazard_id` harus memakai formula yang sama dengan Aggregator:
