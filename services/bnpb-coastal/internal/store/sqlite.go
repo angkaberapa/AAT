@@ -102,11 +102,11 @@ type QuarantineItem struct {
 }
 
 type Stats struct {
-	OutboxPending     int
-	QuarantinePending int
-	Observations      int
-	CacheEntries      int
-	Cursor            string
+	OutboxPending     int    `json:"outbox_pending"`
+	QuarantinePending int    `json:"quarantine_pending"`
+	Observations      int    `json:"observations"`
+	CacheEntries      int    `json:"cache_entries"`
+	Cursor            string `json:"cursor"`
 }
 
 func Open(path string) (*Store, error) {
@@ -303,6 +303,18 @@ func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]OutboxItem, err
 	return items, rows.Err()
 }
 
+// HasUnsentOutbox reports whether any outbox row is still unsent, including
+// rows whose next_attempt_at is in the future. Cursor commits must use this,
+// not PendingOutbox, or a failed item would be skipped and the cursor would
+// move past data that was never accepted by the Aggregator.
+func (s *Store) HasUnsentOutbox(ctx context.Context) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE sent_at IS NULL)`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check unsent outbox: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Store) MarkOutboxSent(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET sent_at = ?, last_error = NULL WHERE id = ?`, formatTime(time.Now()), id)
 	if err != nil {
@@ -349,6 +361,14 @@ func (s *Store) PendingQuarantine(ctx context.Context, limit int) ([]QuarantineI
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) HasUnsentQuarantine(ctx context.Context) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM quarantine WHERE sent_at IS NULL)`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check unsent quarantine: %w", err)
+	}
+	return exists, nil
 }
 
 func (s *Store) MarkQuarantineSent(ctx context.Context, messageID string) error {

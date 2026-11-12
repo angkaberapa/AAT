@@ -186,6 +186,13 @@ func TestOutboxFailureSchedulesRetry(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("failed item should not be pending before retry: %d", len(pending))
 	}
+	unsent, err := db.HasUnsentOutbox(ctx)
+	if err != nil {
+		t.Fatalf("HasUnsentOutbox: %v", err)
+	}
+	if !unsent {
+		t.Fatal("failed item must still block cursor commit")
+	}
 }
 
 func TestQuarantineLifecycle(t *testing.T) {
