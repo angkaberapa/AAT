@@ -18,10 +18,11 @@ func TestIssueUsesIdentitySpecificScopes(t *testing.T) {
 		id     string
 		secret string
 		scope  string
+		role   string
 	}{
-		{id: "media", secret: "media-secret", scope: ScopeHazardsSummary},
-		{id: "field", secret: "field-secret", scope: ScopeHazardsRead},
-		{id: "ops", secret: "ops-secret", scope: ScopeHazardsRead},
+		{id: "media", secret: "media-secret", scope: ScopeHazardsSummary, role: "media"},
+		{id: "field", secret: "field-secret", scope: ScopeHazardsRead, role: "field"},
+		{id: "ops", secret: "ops-secret", scope: ScopeHazardsRead, role: "ops"},
 	}
 	for _, test := range tests {
 		t.Run(test.id, func(t *testing.T) {
@@ -33,7 +34,7 @@ func TestIssueUsesIdentitySpecificScopes(t *testing.T) {
 				t.Fatalf("scope = %q, want %q", pair.Scope, test.scope)
 			}
 			claims := parseAccessToken(t, service, pair.AccessToken)
-			if claims.Subject != test.id || claims.Scope != test.scope || claims.TokenType != "access" {
+			if claims.Subject != test.id || claims.Scope != test.scope || claims.Role != test.role || claims.TokenType != "access" {
 				t.Fatalf("unexpected claims: %+v", claims)
 			}
 		})
@@ -63,6 +64,24 @@ func TestNewServiceRejectsSharedClientSecret(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewService() accepted a secret shared by two client identities")
+	}
+}
+
+func TestNewServiceRejectsUnknownRole(t *testing.T) {
+	_, err := NewService(Config{
+		SigningSecret:  "test-signing-secret-at-least-32-characters",
+		Issuer:         "bnpb-auth",
+		Audience:       "bnpb-api",
+		AccessTokenTTL: time.Minute,
+		RefreshTTL:     10 * time.Minute,
+		Clients: []Client{
+			{ID: "media", Secret: "media-secret", Scope: ScopeHazardsSummary, Role: "media"},
+			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead, Role: "unknown"},
+			{ID: "ops", Secret: "ops-secret", Scope: ScopeHazardsRead, Role: "ops"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected unknown role error")
 	}
 }
 
@@ -154,9 +173,9 @@ func newTestService(t *testing.T) *Service {
 		AccessTokenTTL: time.Minute,
 		RefreshTTL:     10 * time.Minute,
 		Clients: []Client{
-			{ID: "media", Secret: "media-secret", Scope: ScopeHazardsSummary},
-			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead},
-			{ID: "ops", Secret: "ops-secret", Scope: ScopeHazardsRead},
+			{ID: "media", Secret: "media-secret", Scope: ScopeHazardsSummary, Role: "media"},
+			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead, Role: "field"},
+			{ID: "ops", Secret: "ops-secret", Scope: ScopeHazardsRead, Role: "ops"},
 		},
 	})
 	if err != nil {

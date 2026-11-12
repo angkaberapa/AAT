@@ -47,7 +47,7 @@ func TestVerifierAcceptsValidTokenAndRejectsExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
-	if principal.ClientID != "media" || !principal.HasScope(ScopeHazardsSummary) {
+	if principal.ClientID != "media" || principal.Role != "media" || !principal.HasScope(ScopeHazardsSummary) {
 		t.Fatalf("unexpected principal: %+v", principal)
 	}
 
@@ -290,6 +290,7 @@ func signTestToken(t *testing.T, privateKey ed25519.PrivateKey, kid string, expi
 	t.Helper()
 	claims := Claims{
 		Scope:     ScopeHazardsSummary,
+		Role:      "media",
 		TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "bnpb-auth",
