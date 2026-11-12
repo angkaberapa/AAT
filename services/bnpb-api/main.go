@@ -47,14 +47,21 @@ func main() {
 		os.Exit(1)
 	}
 	// P2: global in-flight cap first (cheap, protects even token verification), then
-	// authentication, then a per-client token bucket keyed by the verified identity.
+	// authentication, then P5 priority admission, then a per-client token bucket.
 	concurrency := limit.Concurrency(cfg.MaxConcurrentRequests)
+	priority := limit.NewPriority(cfg.MaxConcurrentRequests, cfg.MediaMaxConcurrentRequests, func(r *http.Request) string {
+		principal, ok := security.PrincipalFromContext(r.Context())
+		if !ok {
+			return ""
+		}
+		return principal.Role
+	})
 	perClient := limit.NewPerClient(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, func(r *http.Request) (string, bool) {
 		principal, ok := security.PrincipalFromContext(r.Context())
 		return principal.ClientID, ok
 	})
 	hazardHandler.Register(mux, func(next http.Handler) http.Handler {
-		return concurrency(verifier.Middleware(perClient.Middleware(next)))
+		return concurrency(verifier.Middleware(priority.Middleware(perClient.Middleware(next))))
 	})
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {
