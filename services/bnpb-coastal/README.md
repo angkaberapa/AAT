@@ -6,7 +6,7 @@ Ingest API, menyimpan cursor/outbox di SQLite, dan membuka circuit breaker saat
 sensor bermasalah. Metrics Prometheus dan manifest Kubernetes sudah ada.
 
 Kontrak integrasi: `docs/KONTRAK_INTERNAL_INGEST.md`.
-Rencana kerja: `docs/M2_P4_P5_PLAN.md`.
+Rencana kerja: `docs/M2_P4_P5_BONUS_PLAN.md`.
 
 ## Isi
 
