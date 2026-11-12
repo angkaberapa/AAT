@@ -1,0 +1,146 @@
+# Sensor Pantai (image tetap dari asisten) dan consumer P5.
+# Sensor memakai PVC lokal karena profil exam menyimpan state skenario.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sensor-pantai-data
+  labels: { app: sensor-pantai, role: sensor }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 100Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sensor-pantai
+  labels: { app: sensor-pantai, role: sensor }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: sensor-pantai }
+  template:
+    metadata:
+      labels: { app: sensor-pantai, role: sensor }
+    spec:
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532 }
+      containers:
+        - name: sensor-pantai
+          image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+          ports: [{ containerPort: 8080, name: http }]
+          env:
+            - name: PANTAI_AUTH_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: PANTAI_AUTH_TOKEN } }
+            - name: PANTAI_PROFILE
+              value: practice
+            - name: PANTAI_ADDR
+              value: ":8080"
+            - name: PANTAI_STATE_DIR
+              value: /data
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: sensor-pantai-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sensor-pantai
+  labels: { app: sensor-pantai, role: sensor }
+spec:
+  selector: { app: sensor-pantai }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-coastal-config
+data:
+  LOG_LEVEL: INFO
+  SENSOR_BASE_URL: http://sensor-pantai:8080
+  SENSOR_POLL_INTERVAL_SECONDS: "2"
+  SENSOR_PAGE_LIMIT: "500"
+  SENSOR_MAX_STALENESS_SECONDS: "900"
+  SENSOR_TIMEOUT_MS: "5000"
+  BREAKER_FAILURE_THRESHOLD: "5"
+  BREAKER_OPEN_SECONDS: "30"
+  BREAKER_HALF_OPEN_MAX: "1"
+  AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+  AGGREGATOR_TIMEOUT_MS: "5000"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bnpb-coastal-data
+  labels: { app: bnpb-coastal, role: consumer }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 100Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-coastal
+  labels: { app: bnpb-coastal, role: consumer }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bnpb-coastal }
+  template:
+    metadata:
+      labels: { app: bnpb-coastal, role: consumer }
+    spec:
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532 }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bnpb-coastal
+          image: aat/bnpb-coastal:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-coastal-config } }]
+          env:
+            - name: COASTAL_DB_PATH
+              value: /data/coastal.db
+            - name: PANTAI_AUTH_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: PANTAI_AUTH_TOKEN } }
+            - name: COASTAL_INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: COASTAL_INGEST_TOKEN } }
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bnpb-coastal-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-coastal
+  labels: { app: bnpb-coastal, role: consumer }
+spec:
+  selector: { app: bnpb-coastal }
+  ports: [{ name: http, port: 8000, targetPort: http }]
