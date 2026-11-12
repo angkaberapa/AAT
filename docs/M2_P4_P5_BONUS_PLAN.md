@@ -6,7 +6,8 @@ Backup: `backup/m2-p5-coastal-ingest-2026-11-13`
 Kontrak: `docs/KONTRAK_INTERNAL_INGEST.md`
 
 Dokumen ini menggantikan rencana singkat `M2_P4_P5_PLAN.md`. Isinya memetakan
-setiap kriteria ke pekerjaan, bukti, dan urutan commit.
+setiap kriteria ke pekerjaan, bukti, dan urutan commit. Rincian tiap commit ada
+di `docs/commits/`, satu file per commit.
 
 ## 1. Definisi selesai
 
@@ -232,7 +233,7 @@ Kalau molor: P5 diselesaikan dulu, P4 bagian inti, bonus dilepas.
 
 ## 11. Status history dan keputusan
 
-History sekarang punya 8 commit. Dua commit terlalu lebar:
+History sekarang punya beberapa commit. Dua di antaranya terlalu lebar:
 
 - `b7e14c2`: sensor client, validator, processor, main, Dockerfile.
 - `d32e33a`: circuit breaker, metrics, manifest, wiring.
