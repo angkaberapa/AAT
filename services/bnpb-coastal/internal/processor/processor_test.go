@@ -211,6 +211,64 @@ func TestPollOnceDoesNotCommitCursorWhenIngestFails(t *testing.T) {
 	}
 }
 
+func TestPollOnceParksTerminalValidationFailure(t *testing.T) {
+	fake := &fakeIngest{failUpsert: &ingest.APIError{StatusCode: 422, Code: "validation_failed", Message: "source_ref_id is required"}}
+	processor, db, _ := newTestProcessor(t, sensor.Page{
+		GeneratedAt: pageGeneratedAt,
+		Items:       []json.RawMessage{validObservation("obs-1")},
+		NextCursor:  "cursor-2",
+	}, fake)
+
+	processor.pollOnce(context.Background())
+
+	if len(fake.unprocessed) != 1 {
+		t.Fatalf("unprocessed = %+v", fake.unprocessed)
+	}
+	if !strings.Contains(fake.unprocessed[0].Reason, "ingest_rejected") {
+		t.Fatalf("reason = %q", fake.unprocessed[0].Reason)
+	}
+	cursor, err := db.Cursor(context.Background())
+	if err != nil {
+		t.Fatalf("Cursor: %v", err)
+	}
+	if cursor != "cursor-2" {
+		t.Fatalf("cursor = %q, want cursor-2 after parking", cursor)
+	}
+	stats, err := db.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.OutboxParked != 1 || stats.OutboxPending != 0 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestPollOnceStopsOnAuthFailure(t *testing.T) {
+	fake := &fakeIngest{failUpsert: &ingest.APIError{StatusCode: 401, Code: "unauthorized", Message: "bad token"}}
+	processor, db, _ := newTestProcessor(t, sensor.Page{
+		GeneratedAt: pageGeneratedAt,
+		Items:       []json.RawMessage{validObservation("obs-1")},
+		NextCursor:  "cursor-2",
+	}, fake)
+
+	processor.pollOnce(context.Background())
+
+	cursor, err := db.Cursor(context.Background())
+	if err != nil {
+		t.Fatalf("Cursor: %v", err)
+	}
+	if cursor != "" {
+		t.Fatalf("cursor must not advance on auth failure, got %q", cursor)
+	}
+	unsent, err := db.HasUnsentOutbox(context.Background())
+	if err != nil || !unsent {
+		t.Fatalf("unsent outbox = %v, err = %v", unsent, err)
+	}
+	if len(fake.unprocessed) != 0 {
+		t.Fatalf("auth failure must not be parked: %+v", fake.unprocessed)
+	}
+}
+
 func TestPollOnceCircuitOpenReportsReason(t *testing.T) {
 	fake := &fakeIngest{}
 	processor, _, sensorClient := newTestProcessor(t, sensor.Page{}, fake)
