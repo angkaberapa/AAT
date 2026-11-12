@@ -269,6 +269,22 @@ func TestPollOnceStopsOnAuthFailure(t *testing.T) {
 	}
 }
 
+func TestPollOnceCircuitOpenReportsReason(t *testing.T) {
+	fake := &fakeIngest{}
+	processor, _, sensorClient := newTestProcessor(t, sensor.Page{}, fake)
+	sensorClient.err = sensor.ErrCircuitOpen
+
+	processor.pollOnce(context.Background())
+
+	if len(fake.statuses) == 0 {
+		t.Fatal("expected source status")
+	}
+	last := fake.statuses[len(fake.statuses)-1]
+	if last.Status != "degraded" || last.ReasonCode != "circuit_open" {
+		t.Fatalf("last status = %+v", last)
+	}
+}
+
 func TestPollOnceSensorFailureReportsStatus(t *testing.T) {
 	fake := &fakeIngest{}
 	processor, db, sensorClient := newTestProcessor(t, sensor.Page{}, fake)

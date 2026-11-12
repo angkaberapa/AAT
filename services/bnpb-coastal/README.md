@@ -2,8 +2,8 @@
 
 Service P5 untuk Milestone 2. Saat ini bisa poll Sensor Pantai, memvalidasi
 kontrak, menyisihkan data invalid, mengirim HazardEvent COASTAL lewat Internal
-Ingest API, dan menyimpan cursor/outbox di SQLite. Circuit breaker, cache
-metrics, dan deployment Kubernetes belum masuk.
+Ingest API, menyimpan cursor/outbox di SQLite, dan membuka circuit breaker saat
+sensor bermasalah. Metrics Prometheus dan manifest Kubernetes sudah ada.
 
 Kontrak integrasi: `docs/KONTRAK_INTERNAL_INGEST.md`.
 Rencana kerja: `docs/M2_P4_P5_PLAN.md`.
@@ -15,9 +15,10 @@ Rencana kerja: `docs/M2_P4_P5_PLAN.md`.
 - `internal/coastal`: validator kontrak, station table, mapper ke HazardEvent.
 - `internal/store`: SQLite schema, cursor, observations, outbox, quarantine, cache.
 - `internal/processor`: poll, validasi, quarantine, outbox, commit cursor.
+- `internal/metrics`: metrics Prometheus sesuai kontrak §9.2.
 - `internal/core`: correlation ID, logger, env, HTTP server. Salinan dari service lain.
 - `cmd/fake-aggregator`: fake Aggregator untuk development dan test.
-- `main.go`: wiring service, `GET /health`, `GET /status`.
+- `main.go`: wiring service, `GET /health`, `GET /status`, `GET /metrics`.
 
 ## Menjalankan lokal
 
@@ -51,7 +52,12 @@ $env:PORT="18082"
 go run .
 ```
 
-Cek `http://localhost:18082/status` dan `http://localhost:18081/debug/state`.
+Cek `http://localhost:18082/status`, `http://localhost:18082/metrics`, dan
+`http://localhost:18081/debug/state`.
+
+Circuit breaker membuka setelah 5 kegagalan retryable (default), menunggu 30
+detik, lalu mencoba satu probe. Saat breaker terbuka, request ke sensor tidak
+dilakukan dan status sumber menjadi `degraded` dengan `reason_code=circuit_open`.
 
 Endpoint fake Aggregator:
 
@@ -69,15 +75,43 @@ go test -race ./...
 go vet ./...
 ```
 
+## Kubernetes
+
+Manifest ada di `k8s/base/coastal.yaml` dan sudah masuk `kustomization.yaml`.
+Isinya Deployment `sensor-pantai` (role=sensor), Deployment `bnpb-coastal`
+(role=consumer), PVC, Service, dan ConfigMap.
+
+Sebelum deploy, isi dua Secret di `.env`:
+
+```text
+PANTAI_AUTH_TOKEN=...
+COASTAL_INGEST_TOKEN=...
+```
+
+Build image dan deploy:
+
+```bash
+scripts/k3d-up.sh
+scripts/deploy.sh
+```
+
+Untuk cluster demo, gunakan `OVERLAY=demo scripts/deploy.sh` setelah overlay
+demo tersedia. Sensor masih memakai `PANTAI_PROFILE=practice`; profil exam
+memerlukan kunci dari asisten.
+
 ## Batasan saat ini
 
-- Circuit breaker, metrics Prometheus, dan manifest Kubernetes belum ada.
+- Station table dan mapping severity masih provisional sampai kontrak resmi
+  Sensor Pantai tersedia.
+- Load shedding dan prioritas Tim Lapangan vs Media belum ada. Itu menyentuh
+  `bnpb-api` dan `POST /field-reports`, bukan service ini.
+- Game day, SLO, dan postmortem P5 belum dijalankan.
+- Quarantine sudah dikirim ke `unprocessed`, tetapi Audit API yang membacanya
+  adalah deliverable P1/P3.
 - `400`, `401`, `403`, dan `404` dari Aggregator dianggap masalah konfigurasi,
   jadi outbox berhenti dan cursor tidak maju sampai token/endpoint diperbaiki.
 - `409`, `413`, dan `422` dianggap masalah satu event. Event itu diparkir ke
   `unprocessed` dan cursor tetap bisa maju.
-- Station table dan mapping severity masih provisional sampai kontrak resmi
-  Sensor Pantai tersedia.
 
 ## Deklarasi AI
 

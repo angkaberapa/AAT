@@ -15,6 +15,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/coastal"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/ingest"
+	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/metrics"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/sensor"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/store"
 )
@@ -27,18 +28,20 @@ type Config struct {
 	PollInterval time.Duration
 	PageLimit    int
 	MaxStaleness time.Duration
+	CircuitState func() int
 }
 
 type Processor struct {
-	logger *slog.Logger
-	sensor SensorClient
-	store  *store.Store
-	ingest ingest.Client
-	config Config
-	now    func() time.Time
+	logger  *slog.Logger
+	sensor  SensorClient
+	store   *store.Store
+	ingest  ingest.Client
+	metrics *metrics.Metrics
+	config  Config
+	now     func() time.Time
 }
 
-func New(logger *slog.Logger, sensorClient SensorClient, store *store.Store, ingestClient ingest.Client, config Config) (*Processor, error) {
+func New(logger *slog.Logger, sensorClient SensorClient, store *store.Store, ingestClient ingest.Client, config Config, recorder ...*metrics.Metrics) (*Processor, error) {
 	if logger == nil || sensorClient == nil || store == nil || ingestClient == nil {
 		return nil, fmt.Errorf("processor dependencies are required")
 	}
@@ -48,13 +51,21 @@ func New(logger *slog.Logger, sensorClient SensorClient, store *store.Store, ing
 	if config.PageLimit < 1 || config.PageLimit > 1000 {
 		config.PageLimit = 500
 	}
+	rec := (*metrics.Metrics)(nil)
+	if len(recorder) > 0 {
+		rec = recorder[0]
+	}
+	if rec == nil {
+		rec = metrics.New()
+	}
 	return &Processor{
-		logger: logger,
-		sensor: sensorClient,
-		store:  store,
-		ingest: ingestClient,
-		config: config,
-		now:    time.Now,
+		logger:  logger,
+		sensor:  sensorClient,
+		store:   store,
+		ingest:  ingestClient,
+		metrics: rec,
+		config:  config,
+		now:     time.Now,
 	}, nil
 }
 
@@ -82,19 +93,25 @@ func (p *Processor) Run(ctx context.Context) {
 func (p *Processor) pollOnce(parent context.Context) {
 	ctx := core.WithCorrelationID(parent, core.NewCorrelationID())
 	logger := p.logger.With("cycle", core.CorrelationID(ctx))
+	started := time.Now()
+	p.setCircuitState()
 
 	cursor, err := p.store.Cursor(ctx)
 	if err != nil {
+		p.metrics.ObserveRequest("error", time.Since(started))
 		logger.ErrorContext(ctx, "read cursor failed", "error", err.Error())
 		return
 	}
 
 	page, err := p.sensor.FetchPage(ctx, cursor, p.config.PageLimit)
 	if err != nil {
+		p.metrics.ObserveRequest("error", time.Since(started))
 		logger.WarnContext(ctx, "sensor fetch failed", "error", err.Error(), "cursor", cursor)
 		p.reportStatus(ctx, "degraded", cursor, err)
+		p.setCircuitState()
 		return
 	}
+	p.metrics.ObserveRequest("ok", time.Since(started))
 
 	receivedAt := p.now().UTC()
 	nextCursor := page.NextCursor
@@ -109,10 +126,18 @@ func (p *Processor) pollOnce(parent context.Context) {
 			observation, validationErr := coastal.Validate(raw, page.GeneratedAt, receivedAt, p.config.MaxStaleness)
 			if validationErr != nil {
 				quarantined++
+				p.metrics.IncInvalid(validationErr.Reason)
 				if err := p.enqueueQuarantine(ctx, tx, raw, nextCursor, receivedAt, validationErr); err != nil {
 					return err
 				}
 				continue
+			}
+			if observation.Critical {
+				latency := receivedAt.Sub(observation.ObservedAt).Seconds()
+				if latency < 0 {
+					latency = 0
+				}
+				p.metrics.ObserveCriticalLatency(latency)
 			}
 
 			station, _ := coastal.LookupStation(observation.StationID)
@@ -163,6 +188,21 @@ func (p *Processor) pollOnce(parent context.Context) {
 		p.reportSuccess(ctx, lastEventAt, page.GeneratedAt)
 	}
 	p.commitCursorIfDrained(ctx, logger, nextCursor)
+
+	if stats, err := p.store.Stats(ctx); err == nil {
+		p.metrics.SetQueues(stats.OutboxPending, stats.QuarantinePending)
+	}
+	if lastEventAt, err := p.store.LastEventAt(ctx); err == nil && lastEventAt != nil {
+		lag := page.GeneratedAt.Sub(*lastEventAt).Seconds()
+		if lag < 0 {
+			lag = 0
+		}
+		p.metrics.SetCursorLag(lag)
+		// The sensor runs on virtual time in practice, so cache age is relative
+		// to generated_at, not the wall clock.
+		p.metrics.SetCacheAge(lag)
+	}
+	p.setCircuitState()
 
 	logger.InfoContext(ctx, "sensor page processed",
 		"items", len(page.Items), "valid", valid, "quarantined", quarantined, "cursor", nextCursor)
@@ -333,6 +373,12 @@ func (p *Processor) commitCursorIfDrained(ctx context.Context, logger *slog.Logg
 	}
 }
 
+func (p *Processor) setCircuitState() {
+	if p.config.CircuitState != nil {
+		p.metrics.SetCircuitState(p.config.CircuitState())
+	}
+}
+
 func (p *Processor) reportSuccess(ctx context.Context, lastEventAt *time.Time, generatedAt time.Time) {
 	var lag *float64
 	if lastEventAt != nil {
@@ -354,6 +400,9 @@ func (p *Processor) reportSuccess(ctx context.Context, lastEventAt *time.Time, g
 
 func (p *Processor) reportStatus(ctx context.Context, status, cursor string, cause error) {
 	reason := "upstream_unavailable"
+	if errors.Is(cause, sensor.ErrCircuitOpen) {
+		reason = "circuit_open"
+	}
 	var sensorErr *sensor.APIError
 	if errors.As(cause, &sensorErr) {
 		switch sensorErr.StatusCode {

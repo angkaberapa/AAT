@@ -14,6 +14,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/ingest"
+	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/metrics"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/processor"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/sensor"
 	"github.com/angkaberapa/AAT/services/bnpb-coastal/internal/store"
@@ -39,27 +40,36 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
-	sensorClient, err := sensor.NewHTTPClient(cfg.SensorBaseURL, cfg.SensorToken, cfg.SensorTimeout)
+	sensorHTTP, err := sensor.NewHTTPClient(cfg.SensorBaseURL, cfg.SensorToken, cfg.SensorTimeout)
 	if err != nil {
 		logger.Error("sensor client", "error", err.Error())
 		os.Exit(1)
 	}
+	breaker := sensor.NewBreaker(sensor.BreakerConfig{
+		FailureThreshold: cfg.BreakerFailureThreshold,
+		OpenTimeout:      cfg.BreakerOpenTimeout,
+		HalfOpenMax:      cfg.BreakerHalfOpenMax,
+	})
+	sensorClient := sensor.NewBreakerClient(sensorHTTP, breaker)
 	ingestClient, err := ingest.NewHTTPClient(cfg.AggregatorBaseURL, cfg.CoastalIngestToken, cfg.AggregatorTimeout)
 	if err != nil {
 		logger.Error("ingest client", "error", err.Error())
 		os.Exit(1)
 	}
+	recorder := metrics.New()
 	proc, err := processor.New(logger, sensorClient, db, ingestClient, processor.Config{
 		PollInterval: cfg.SensorPollInterval,
 		PageLimit:    cfg.SensorPageLimit,
 		MaxStaleness: cfg.SensorMaxStaleness,
-	})
+		CircuitState: func() int { return int(sensorClient.State()) },
+	}, recorder)
 	if err != nil {
 		logger.Error("processor", "error", err.Error())
 		os.Exit(1)
 	}
 
 	mux := core.NewMux(cfg.ServiceName)
+	mux.Handle("GET /metrics", recorder.Handler())
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		stats, err := db.Stats(r.Context())
 		if err != nil {
