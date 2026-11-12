@@ -191,6 +191,53 @@ func DeactivateDetectionTx(ctx context.Context, tx *sql.Tx, key string) error {
 	return nil
 }
 
+func (s *Store) ActiveDetections(ctx context.Context) ([]domain.Detection, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT detection_key, satellite, acq_date, acq_time, latitude, longitude,
+		       confidence, frp, observed_at, raw_json
+		FROM detections WHERE active = 1 ORDER BY detection_key`)
+	if err != nil {
+		return nil, fmt.Errorf("list active detections: %w", err)
+	}
+	defer rows.Close()
+
+	var detections []domain.Detection
+	for rows.Next() {
+		var detection domain.Detection
+		var observed string
+		var frp sql.NullFloat64
+		if err := rows.Scan(&detection.Key, &detection.Satellite, &detection.AcqDate, &detection.AcqTime,
+			&detection.Latitude, &detection.Longitude, &detection.Confidence, &frp, &observed, &detection.RawJSON); err != nil {
+			return nil, fmt.Errorf("scan active detection: %w", err)
+		}
+		if frp.Valid {
+			value := frp.Float64
+			detection.FRP = &value
+		}
+		detection.ObservedAt, _ = parseTime(observed)
+		detection.Active = true
+		detections = append(detections, detection)
+	}
+	return detections, rows.Err()
+}
+
+func (s *Store) ActiveFireIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT fire_id FROM fires WHERE active = 1 ORDER BY fire_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list active fires: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan active fire: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) DetectionCount(ctx context.Context) (int, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM detections`).Scan(&count); err != nil {

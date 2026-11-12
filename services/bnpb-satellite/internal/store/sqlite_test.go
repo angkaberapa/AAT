@@ -153,6 +153,56 @@ func TestFireUpsertAndDelete(t *testing.T) {
 	}
 }
 
+func TestActiveDetectionsAndFires(t *testing.T) {
+	db := testStore(t)
+	ctx := context.Background()
+	detection := testDetection("A")
+	if err := db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := InsertDetectionTx(ctx, tx, detection)
+		if err != nil {
+			return err
+		}
+		_, err = UpsertFireTx(ctx, tx, domain.Fire{
+			FireID:            "fire-1",
+			EventJSON:         []byte(`{}`),
+			FirstDetectionKey: "A",
+			LastDetectionAt:   time.Date(2026, 11, 12, 2, 43, 0, 0, time.UTC),
+			DetectionCount:    1,
+			Active:            true,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	active, err := db.ActiveDetections(ctx)
+	if err != nil || len(active) != 1 || active[0].Key != "A" {
+		t.Fatalf("active = %+v, err = %v", active, err)
+	}
+	ids, err := db.ActiveFireIDs(ctx)
+	if err != nil || len(ids) != 1 || ids[0] != "fire-1" {
+		t.Fatalf("ids = %+v, err = %v", ids, err)
+	}
+
+	if err := db.WithTx(ctx, func(tx *sql.Tx) error {
+		if err := DeactivateDetectionTx(ctx, tx, "A"); err != nil {
+			return err
+		}
+		_, err := DeleteFireTx(ctx, tx, "fire-1")
+		return err
+	}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	active, _ = db.ActiveDetections(ctx)
+	if len(active) != 0 {
+		t.Fatalf("active after deactivate = %+v", active)
+	}
+	ids, _ = db.ActiveFireIDs(ctx)
+	if len(ids) != 0 {
+		t.Fatalf("ids after delete = %+v", ids)
+	}
+}
+
 func TestOutboxLifecycle(t *testing.T) {
 	db := testStore(t)
 	ctx := context.Background()
