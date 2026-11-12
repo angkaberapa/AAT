@@ -42,9 +42,11 @@ CREATE TABLE IF NOT EXISTS outbox (
 	attempts INTEGER NOT NULL DEFAULT 0,
 	next_attempt_at TEXT NOT NULL,
 	last_error TEXT,
-	sent_at TEXT
+	sent_at TEXT,
+	parked_at TEXT,
+	park_reason TEXT
 );
-CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(sent_at, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(sent_at, parked_at, next_attempt_at, id);
 
 CREATE TABLE IF NOT EXISTS quarantine (
 	message_id TEXT PRIMARY KEY,
@@ -103,6 +105,7 @@ type QuarantineItem struct {
 
 type Stats struct {
 	OutboxPending     int    `json:"outbox_pending"`
+	OutboxParked      int    `json:"outbox_parked"`
 	QuarantinePending int    `json:"quarantine_pending"`
 	Observations      int    `json:"observations"`
 	CacheEntries      int    `json:"cache_entries"`
@@ -144,7 +147,26 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migrate(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate keeps databases created by the first slice usable after the outbox
+// gained parked_at/park_reason. New databases already have the columns, so
+// duplicate-column errors are expected and ignored.
+func migrate(ctx context.Context, db *sql.DB) error {
+	for _, statement := range []string{
+		`ALTER TABLE outbox ADD COLUMN parked_at TEXT`,
+		`ALTER TABLE outbox ADD COLUMN park_reason TEXT`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate outbox: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -282,7 +304,7 @@ func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]OutboxItem, err
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, producer_event_id, operation, source_position, payload, attempts, next_attempt_at, COALESCE(last_error, '')
 		FROM outbox
-		WHERE sent_at IS NULL AND next_attempt_at <= ?
+		WHERE sent_at IS NULL AND parked_at IS NULL AND next_attempt_at <= ?
 		ORDER BY id
 		LIMIT ?`, formatTime(time.Now()), limit)
 	if err != nil {
@@ -309,7 +331,7 @@ func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]OutboxItem, err
 // move past data that was never accepted by the Aggregator.
 func (s *Store) HasUnsentOutbox(ctx context.Context) (bool, error) {
 	var exists bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE sent_at IS NULL)`).Scan(&exists); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outbox WHERE sent_at IS NULL AND parked_at IS NULL)`).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check unsent outbox: %w", err)
 	}
 	return exists, nil
@@ -331,6 +353,24 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, message string, 
 		return fmt.Errorf("mark outbox failed: %w", err)
 	}
 	return nil
+}
+
+// ParkOutboxWithQuarantine stops retrying a terminal 4xx and records the
+// command in the unprocessed quarantine in the same transaction. The outbox
+// row is parked, so it no longer blocks the cursor, but the payload is kept.
+func (s *Store) ParkOutboxWithQuarantine(ctx context.Context, id int64, reason string, item QuarantineItem) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		now := formatTime(time.Now())
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE outbox SET parked_at = ?, park_reason = ?, last_error = ? WHERE id = ?`,
+			now, reason, reason, id); err != nil {
+			return fmt.Errorf("park outbox: %w", err)
+		}
+		if _, err := EnqueueQuarantineTx(ctx, tx, item); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (s *Store) PendingQuarantine(ctx context.Context, limit int) ([]QuarantineItem, error) {
@@ -407,8 +447,11 @@ func (s *Store) LastEventAt(ctx context.Context) (*time.Time, error) {
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var stats Stats
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&stats.OutboxPending); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND parked_at IS NULL`).Scan(&stats.OutboxPending); err != nil {
 		return stats, fmt.Errorf("count outbox: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE parked_at IS NOT NULL`).Scan(&stats.OutboxParked); err != nil {
+		return stats, fmt.Errorf("count parked outbox: %w", err)
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM quarantine WHERE sent_at IS NULL`).Scan(&stats.QuarantinePending); err != nil {
 		return stats, fmt.Errorf("count quarantine: %w", err)

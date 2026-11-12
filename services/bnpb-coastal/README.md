@@ -72,9 +72,10 @@ go vet ./...
 ## Batasan saat ini
 
 - Circuit breaker, metrics Prometheus, dan manifest Kubernetes belum ada.
-- Jika Aggregator mengembalikan `4xx` terminal, outbox tidak dianggap terkirim
-  dan cursor berhenti. Slice berikutnya akan memindahkan command itu ke
-  `unprocessed` agar pipeline tidak macet.
+- `400`, `401`, `403`, dan `404` dari Aggregator dianggap masalah konfigurasi,
+  jadi outbox berhenti dan cursor tidak maju sampai token/endpoint diperbaiki.
+- `409`, `413`, dan `422` dianggap masalah satu event. Event itu diparkir ke
+  `unprocessed` dan cursor tetap bisa maju.
 - Station table dan mapping severity masih provisional sampai kontrak resmi
   Sensor Pantai tersedia.
 

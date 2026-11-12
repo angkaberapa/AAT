@@ -195,6 +195,57 @@ func TestOutboxFailureSchedulesRetry(t *testing.T) {
 	}
 }
 
+func TestParkOutboxWithQuarantine(t *testing.T) {
+	db := testStore(t)
+	ctx := context.Background()
+	if err := db.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := EnqueueOutboxTx(ctx, tx, OutboxItem{
+			ProducerEventID: "coastal-observation-1",
+			Operation:       "UPSERT",
+			SourcePosition:  "cursor-1",
+			Payload:         []byte(`{"operation":"UPSERT"}`),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("EnqueueOutboxTx: %v", err)
+	}
+	pending, err := db.PendingOutbox(ctx, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %v, err = %v", pending, err)
+	}
+
+	reason := "ingest_rejected: 422 validation_failed"
+	if err := db.ParkOutboxWithQuarantine(ctx, pending[0].ID, reason, QuarantineItem{
+		MessageID:        "coastal-ingest-coastal-observation-1",
+		SourcePosition:   "cursor-1",
+		ReceivedAt:       time.Now().UTC(),
+		Reason:           reason,
+		Retryable:        false,
+		Status:           "parked",
+		RawPayloadBase64: "e30=",
+		ContentType:      "application/json",
+	}); err != nil {
+		t.Fatalf("ParkOutboxWithQuarantine: %v", err)
+	}
+
+	pending, err = db.PendingOutbox(ctx, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("parked item should not be pending: %v, err = %v", pending, err)
+	}
+	unsent, err := db.HasUnsentOutbox(ctx)
+	if err != nil || unsent {
+		t.Fatalf("parked item must not block cursor: unsent = %v, err = %v", unsent, err)
+	}
+	quarantine, err := db.PendingQuarantine(ctx, 10)
+	if err != nil || len(quarantine) != 1 {
+		t.Fatalf("quarantine = %v, err = %v", quarantine, err)
+	}
+	stats, err := db.Stats(ctx)
+	if err != nil || stats.OutboxParked != 1 || stats.OutboxPending != 0 {
+		t.Fatalf("stats = %+v, err = %v", stats, err)
+	}
+}
+
 func TestQuarantineLifecycle(t *testing.T) {
 	db := testStore(t)
 	ctx := context.Background()
