@@ -16,6 +16,7 @@ const fieldOK = new Counter('p5_field_ok');
 const fieldRejected = new Counter('p5_field_rejected');
 const mediaOK = new Counter('p5_media_ok');
 const mediaRejected = new Counter('p5_media_rejected');
+const mediaMissingRetryAfter = new Counter('p5_media_429_missing_retry_after');
 
 export const options = {
   scenarios: {
@@ -42,6 +43,7 @@ export const options = {
     p5_field_ok: ['count>0'],
     p5_field_rejected: ['count==0'],
     p5_media_rejected: ['count>0'],
+    p5_media_429_missing_retry_after: ['count==0'],
   },
 };
 
@@ -52,6 +54,10 @@ export function mediaFlood() {
     mediaOK.add(1);
   } else if (response.status === 429) {
     mediaRejected.add(1);
+    const retryAfter = response.headers['Retry-After'] || response.headers['retry-after'];
+    if (!retryAfter) {
+      mediaMissingRetryAfter.add(1);
+    }
   }
   check(response, {
     'media gets 200 or controlled 429': (r) => r.status === 200 || r.status === 429,
@@ -85,6 +91,7 @@ export function handleSummary(data) {
     '',
     `- Field 200: ${count('p5_field_ok')}, 429: ${count('p5_field_rejected')}`,
     `- Media 200: ${count('p5_media_ok')}, 429: ${count('p5_media_rejected')}`,
+    `- Media 429 tanpa Retry-After: ${count('p5_media_429_missing_retry_after')}`,
     '',
   ].join('\n');
   const text = summary.stdout + perRole;

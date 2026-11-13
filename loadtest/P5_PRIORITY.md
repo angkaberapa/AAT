@@ -31,20 +31,22 @@ selama 60 detik.
 
 | Metrik | Hasil |
 |---|---|
-| Request data | 85.792 |
-| Throughput | 1.418,1 req/s |
-| 200 | 18.559 (306,8 req/s) |
-| 429 terkontrol | 67.233 (78,37%) |
+| Request data | 86.021 |
+| Throughput | 1.421,8 req/s |
+| 200 | 18.531 (306,3 req/s) |
+| 429 terkontrol | 67.490 (78,46%) |
 | Error di luar 429 | 0 |
 | 5xx | 0 |
 | Field 200 | 601 |
 | Field 429 | 0 |
-| Field p95 | 13,30 ms |
-| Media 200 | 17.958 |
-| Media 429 | 67.233 |
-| Media p95 | 14,22 ms |
+| Field p95 | 11,57 ms |
+| Media 200 | 17.930 |
+| Media 429 | 67.490 |
+| Media 429 tanpa `Retry-After` | 0 |
+| Media p95 | 12,87 ms |
 
-Semua threshold lulus. Field tidak pernah ditolak, Media ditolak dengan 429
-setelah batas in-flight-nya tercapai. Media p95 mencakup respons 429 yang
-memang cepat, jadi angka itu bukan latency jalur peringatan. Latency Field
-adalah yang dipakai untuk kriteria P5.
+Semua threshold lulus, termasuk `p5_media_429_missing_retry_after` yang
+memastikan setiap penolakan Media membawa `Retry-After`. Field tidak pernah
+ditolak, Media ditolak dengan 429 setelah batas in-flight-nya tercapai. Media
+p95 mencakup respons 429 yang memang cepat, jadi angka itu bukan latency jalur
+peringatan. Latency Field adalah yang dipakai untuk kriteria P5.
