@@ -7,6 +7,7 @@ resources:
   - mongo.yaml
   - kafka.yaml
   - mocks.yaml
+  - coastal.yaml
   - aggregator.yaml
   - api.yaml
   - consumers.yaml
