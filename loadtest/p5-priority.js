@@ -9,7 +9,13 @@
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { Counter } from 'k6/metrics';
 import { API, CLIENTS, authParams, record, summarize } from './lib/common.js';
+
+const fieldOK = new Counter('p5_field_ok');
+const fieldRejected = new Counter('p5_field_rejected');
+const mediaOK = new Counter('p5_media_ok');
+const mediaRejected = new Counter('p5_media_rejected');
 
 export const options = {
   scenarios: {
@@ -30,14 +36,23 @@ export const options = {
     },
   },
   thresholds: {
+    'http_req_duration{endpoint:media}': ['p(95)<1000'],
     'http_req_duration{endpoint:field}': ['p(95)<2000'],
     api_unexpected_error: ['rate<0.01'],
+    p5_field_ok: ['count>0'],
+    p5_field_rejected: ['count==0'],
+    p5_media_rejected: ['count>0'],
   },
 };
 
 export function mediaFlood() {
   const response = http.get(`${API}/hazards?limit=5`, authParams(CLIENTS.media, { endpoint: 'media' }));
   record(response);
+  if (response.status === 200) {
+    mediaOK.add(1);
+  } else if (response.status === 429) {
+    mediaRejected.add(1);
+  }
   check(response, {
     'media gets 200 or controlled 429': (r) => r.status === 200 || r.status === 429,
   });
@@ -47,6 +62,11 @@ export function mediaFlood() {
 export function fieldSteady() {
   const response = http.get(`${API}/hazards?limit=5`, authParams(CLIENTS.field, { endpoint: 'field' }));
   record(response);
+  if (response.status === 200) {
+    fieldOK.add(1);
+  } else if (response.status === 429) {
+    fieldRejected.add(1);
+  }
   check(response, {
     'field gets 200': (r) => r.status === 200,
   });
@@ -54,8 +74,23 @@ export function fieldSteady() {
 }
 
 export function handleSummary(data) {
-  return summarize('p5-priority', data, {
+  const summary = summarize('p5-priority', data, {
     'Media (200 + 429)': 'http_req_duration{endpoint:media}',
     'Field (200 only)': 'http_req_duration{endpoint:field}',
   });
+  const count = (name) => (data.metrics[name] ? data.metrics[name].values.count : 0);
+  const perRole = [
+    '',
+    '## Peran',
+    '',
+    `- Field 200: ${count('p5_field_ok')}, 429: ${count('p5_field_rejected')}`,
+    `- Media 200: ${count('p5_media_ok')}, 429: ${count('p5_media_rejected')}`,
+    '',
+  ].join('\n');
+  const text = summary.stdout + perRole;
+  return {
+    ...summary,
+    stdout: text,
+    '/results/p5-priority.md': text,
+  };
 }
