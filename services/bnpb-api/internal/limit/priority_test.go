@@ -20,7 +20,7 @@ func TestPriorityCapsMediaAndReservesField(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	priority := NewPriority(4, 1, roleFromHeader)
+	priority := NewPriority(1, roleFromHeader)
 	server := httptest.NewServer(priority.Middleware(handler))
 	defer server.Close()
 
@@ -70,41 +70,6 @@ func TestPriorityCapsMediaAndReservesField(t *testing.T) {
 	}
 }
 
-func TestPriorityTotalCap(t *testing.T) {
-	entered := make(chan struct{}, 1)
-	release := make(chan struct{})
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		entered <- struct{}{}
-		<-release
-		w.WriteHeader(http.StatusOK)
-	})
-	priority := NewPriority(1, 1, roleFromHeader)
-	server := httptest.NewServer(priority.Middleware(handler))
-	defer server.Close()
-
-	go func() {
-		request, _ := http.NewRequest(http.MethodGet, server.URL, nil)
-		request.Header.Set("X-Role", "field")
-		response, err := http.DefaultClient.Do(request)
-		if err == nil {
-			_ = response.Body.Close()
-		}
-	}()
-	<-entered
-
-	second, _ := http.NewRequest(http.MethodGet, server.URL, nil)
-	second.Header.Set("X-Role", "field")
-	response, err := http.DefaultClient.Do(second)
-	if err != nil {
-		t.Fatalf("second request: %v", err)
-	}
-	if response.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", response.StatusCode)
-	}
-	_ = response.Body.Close()
-	close(release)
-}
-
 func TestPriorityTreatsMissingRoleAsMedia(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -113,7 +78,7 @@ func TestPriorityTreatsMissingRoleAsMedia(t *testing.T) {
 		<-release
 		w.WriteHeader(http.StatusOK)
 	})
-	priority := NewPriority(2, 1, roleFromHeader)
+	priority := NewPriority(1, roleFromHeader)
 	server := httptest.NewServer(priority.Middleware(handler))
 	defer server.Close()
 

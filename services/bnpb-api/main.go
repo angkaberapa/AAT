@@ -49,7 +49,7 @@ func main() {
 	// P2: global in-flight cap first (cheap, protects even token verification), then
 	// authentication, then P5 priority admission, then a per-client token bucket.
 	concurrency := limit.Concurrency(cfg.MaxConcurrentRequests)
-	priority := limit.NewPriority(cfg.MaxConcurrentRequests, cfg.MediaMaxConcurrentRequests, func(r *http.Request) string {
+	priority := limit.NewPriority(cfg.MediaMaxConcurrentRequests, func(r *http.Request) string {
 		principal, ok := security.PrincipalFromContext(r.Context())
 		if !ok {
 			return ""
