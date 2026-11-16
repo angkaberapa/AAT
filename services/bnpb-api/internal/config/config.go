@@ -25,8 +25,10 @@ type Config struct {
 
 	// P2: resource-exhaustion protection. 0 disables the respective limit.
 	MaxConcurrentRequests int
-	RateLimitRPS          int // per client identity (JWT subject)
-	RateLimitBurst        int
+	// P5: media gets a lower in-flight cap so field/ops retain reserved capacity.
+	MediaMaxConcurrentRequests int
+	RateLimitRPS               int // per client identity (JWT subject)
+	RateLimitBurst             int
 }
 
 func Load() (Config, error) {
@@ -44,11 +46,14 @@ func Load() (Config, error) {
 
 		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 2000*time.Millisecond),
 
-		MaxConcurrentRequests: e.Int("MAX_CONCURRENT_REQUESTS", 128),
-		RateLimitRPS:          e.Int("RATE_LIMIT_RPS", 300),
-		RateLimitBurst:        e.Int("RATE_LIMIT_BURST", 600),
+		MaxConcurrentRequests:      e.Int("MAX_CONCURRENT_REQUESTS", 128),
+		MediaMaxConcurrentRequests: e.Int("MEDIA_MAX_CONCURRENT_REQUESTS", 96),
+		RateLimitRPS:               e.Int("RATE_LIMIT_RPS", 300),
+		RateLimitBurst:             e.Int("RATE_LIMIT_BURST", 600),
 	}
 	e.Check(c.MaxConcurrentRequests >= 0, "MAX_CONCURRENT_REQUESTS must not be negative")
+	e.Check(c.MediaMaxConcurrentRequests >= 0, "MEDIA_MAX_CONCURRENT_REQUESTS must not be negative")
+	e.Check(c.MaxConcurrentRequests == 0 || c.MediaMaxConcurrentRequests <= c.MaxConcurrentRequests, "MEDIA_MAX_CONCURRENT_REQUESTS must not exceed MAX_CONCURRENT_REQUESTS")
 	e.Check(c.RateLimitRPS >= 0, "RATE_LIMIT_RPS must not be negative")
 	e.Check(c.RateLimitBurst >= 1, "RATE_LIMIT_BURST must be at least 1")
 	return c, e.Err()

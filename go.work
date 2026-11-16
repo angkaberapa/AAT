@@ -1,9 +1,10 @@
-go 1.25.0
+go 1.26.0
 
 use (
 	./services/bnpb-aggregator
 	./services/bnpb-api
 	./services/bnpb-auth
+	./services/bnpb-coastal
 	./services/bnpb-consumer-dashboard
 	./services/bnpb-consumer-notifier
 )

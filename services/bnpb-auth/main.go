@@ -33,9 +33,9 @@ func main() {
 		AccessTokenTTL: cfg.AccessTokenTTL,
 		RefreshTTL:     cfg.RefreshTokenTTL,
 		Clients: []token.Client{
-			{ID: cfg.ClientMediaID, Secret: cfg.ClientMediaSecret, Scope: token.ScopeHazardsSummary},
-			{ID: cfg.ClientFieldID, Secret: cfg.ClientFieldSecret, Scope: token.ScopeHazardsRead},
-			{ID: cfg.ClientOpsID, Secret: cfg.ClientOpsSecret, Scope: token.ScopeHazardsRead},
+			{ID: cfg.ClientMediaID, Secret: cfg.ClientMediaSecret, Scope: token.ScopeHazardsSummary, Role: "media"},
+			{ID: cfg.ClientFieldID, Secret: cfg.ClientFieldSecret, Scope: token.ScopeHazardsRead, Role: "field"},
+			{ID: cfg.ClientOpsID, Secret: cfg.ClientOpsSecret, Scope: token.ScopeHazardsRead, Role: "ops"},
 		},
 	})
 	if err != nil {

@@ -33,12 +33,14 @@ type HTTPClient interface {
 
 type Claims struct {
 	Scope     string `json:"scope"`
+	Role      string `json:"role"`
 	TokenType string `json:"token_type"`
 	jwt.RegisteredClaims
 }
 
 type Principal struct {
 	ClientID string
+	Role     string
 	Scopes   map[string]struct{}
 }
 
@@ -100,7 +102,7 @@ func (verifier *Verifier) Verify(ctx context.Context, raw string) (Principal, er
 	if len(scopes) == 0 {
 		return Principal{}, ErrInvalidToken
 	}
-	return Principal{ClientID: claims.Subject, Scopes: scopes}, nil
+	return Principal{ClientID: claims.Subject, Role: claims.Role, Scopes: scopes}, nil
 }
 
 type JWKSProvider struct {
