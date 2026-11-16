@@ -524,6 +524,25 @@ spec:
         - podSelector:
             matchLabels: { app: mongo-bootstrap }
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo-data-only-from-owner-and-cluster
+spec:
+  podSelector:
+    matchLabels: { role: store }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { role: store }
+        - podSelector:
+            matchLabels: { app: mongo-router }
+        - podSelector:
+            matchLabels: { role: aggregator }
+      ports:
+        - { protocol: TCP, port: 27017 }
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata: { name: mongo-config }
