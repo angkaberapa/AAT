@@ -16,7 +16,6 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
 
-// semua event masuk ke satu collection. belum ada rencana sharding.
 const (
 	collectionName = "hazard_events"
 )
@@ -27,6 +26,7 @@ type Store struct {
 	leadership *mongo.Collection // P2 M2: dokumen fence (epoch leader)
 	statuses   *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
 }
+
 const serverSelectionTimeout = 3 * time.Second
 
 // New bikin koneksi + pastiin index ada. sengaja gak pakai schema, biar nambah field di Attributes gak perlu migrasi.
@@ -47,21 +47,11 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 
 	events := client.Database(database).Collection(collectionName)
 
-	//source + source_ref_id = natural key. retry/repoll harus jadi upsert, bukan duplikat.
-	indexes := []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		},
-		//todo: cek lagi apakah index ini kepake. setauku query List selalu pakai sort ingested_at, jadi kemungkinan iya.
-		{Keys: bson.D{{Key: "ingested_at", Value: 1}}},
-		//hazard_id = hash(source + source_ref_id). dipakai buat get by id.
-		{
-			Keys:    bson.D{{Key: "hazard_id", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		},
+	if err := migrateLegacyEventIndexes(ctx, events); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("migrate event indexes: %w", err)
 	}
-	_, err = events.Indexes().CreateMany(ctx, append(indexes, outboxIndexes()...))
+	_, err = events.Indexes().CreateMany(ctx, append(eventIndexes(), outboxIndexes()...))
 	if err != nil {
 		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("create indexes: %w", err)
@@ -74,6 +64,65 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 		leadership: db.Collection(leadershipCollection),
 		statuses:   db.Collection(sourceStatusCollect),
 	}, nil
+}
+
+// eventIndexes returns indexes that remain valid after hazard_events is sharded by {hazard_id: 1}
+func eventIndexes() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "hazard_id", Value: 1}},
+			Options: options.Index().SetUnique(true),
+		},
+		{
+			Keys: bson.D{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
+			Options: options.Index().
+				SetName("source_ref_lookup"),
+		},
+		{
+			Keys: bson.D{{Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+			Options: options.Index().
+				SetName("audit_ingested_order"),
+		},
+		{
+			Keys: bson.D{{Key: "source", Value: 1}, {Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+			Options: options.Index().
+				SetName("audit_source_ingested_order"),
+		},
+		{
+			Keys: bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}},
+			Options: options.Index().
+				SetName("latest_hazard_order"),
+		},
+	}
+}
+
+func migrateLegacyEventIndexes(ctx context.Context, events *mongo.Collection) error {
+	cur, err := events.Indexes().List(ctx)
+	if err != nil {
+		var commandErr mongo.CommandError
+		if errors.As(err, &commandErr) && commandErr.Code == 26 { // NamespaceNotFound
+			return nil
+		}
+		return fmt.Errorf("list event indexes: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var indexes []struct {
+		Name   string `bson:"name"`
+		Unique bool   `bson:"unique"`
+	}
+	if err := cur.All(ctx, &indexes); err != nil {
+		return fmt.Errorf("decode event indexes: %w", err)
+	}
+	for _, index := range indexes {
+		if index.Name != "source_1_source_ref_id_1" || !index.Unique {
+			continue
+		}
+		if err := events.Indexes().DropOne(ctx, index.Name); err != nil {
+			return fmt.Errorf("drop legacy unique source index: %w", err)
+		}
+	}
+	return nil
 }
 
 func latencyMonitor(logger *slog.Logger) *event.CommandMonitor {
