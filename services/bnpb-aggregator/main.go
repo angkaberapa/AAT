@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/api"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/audit"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
@@ -55,6 +56,12 @@ func main() {
 		return toIngestRecords(recs), err
 	}, polledSources, cfg.SourceStaleAfter, time.Second, logger)
 	api.Register(mux, logger, st, statuses, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
+	location, err := audit.NewKubernetesLocator(st, cfg.PodNamespace)
+	if err != nil {
+		logger.Warn("audit node locator unavailable", "error", err.Error())
+		location = audit.NewUnavailableLocator(err)
+	}
+	audit.Register(mux, logger, st, location, cfg.AuditToken)
 
 	//P5: producer Kafka + relay outbox (relay hanya jalan di leader).
 	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)

@@ -13,7 +13,8 @@ NS=sistem-informasi-kebencanaan-bnpb
 
 SECRET_KEYS=(
   BMKG_API_KEY PVMBG_TOKEN
-  MONGO_ROOT_USER MONGO_ROOT_PASSWORD
+  AUDIT_TOKEN
+  MONGO_ROOT_USER MONGO_ROOT_PASSWORD MONGO_CLUSTER_KEY
   JWT_SIGNING_KEY
   CLIENT_MEDIA_ID CLIENT_MEDIA_SECRET
   CLIENT_FIELD_ID CLIENT_FIELD_SECRET
@@ -50,6 +51,9 @@ kubectl -n "$NS" create secret generic bnpb-secrets "${secret_args[@]}" \
 kubectl apply -k "$ROOT/k8s/overlays/$OVERLAY"
 
 echo "menunggu semua workload siap..."
-kubectl -n "$NS" rollout status statefulset --timeout=300s
-kubectl -n "$NS" rollout status deployment --timeout=300s
+kubectl -n "$NS" rollout status statefulset -l app --timeout=300s
+kubectl -n "$NS" rollout status deployment -l app --timeout=300s
+if kubectl -n "$NS" get job mongo-bootstrap-v1 >/dev/null 2>&1; then
+  kubectl -n "$NS" wait --for=condition=complete job/mongo-bootstrap-v1 --timeout=600s
+fi
 kubectl -n "$NS" get pods -o wide

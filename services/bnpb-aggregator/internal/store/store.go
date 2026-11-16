@@ -12,6 +12,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/event"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
@@ -25,6 +27,8 @@ type Store struct {
 	events     *mongo.Collection
 	leadership *mongo.Collection // P2 M2: dokumen fence (epoch leader)
 	statuses   *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
+	mongoURI   string
+	database   string
 }
 
 const serverSelectionTimeout = 3 * time.Second
@@ -34,6 +38,8 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 	client, err := mongo.Connect(options.Client().
 		ApplyURI(uri).
 		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true}).
+		SetReadConcern(readconcern.Majority()).
+		SetWriteConcern(writeconcern.Majority()).
 		SetServerSelectionTimeout(serverSelectionTimeout).
 		SetMonitor(latencyMonitor(logger)))
 	if err != nil {
@@ -63,6 +69,8 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 		events:     events,
 		leadership: db.Collection(leadershipCollection),
 		statuses:   db.Collection(sourceStatusCollect),
+		mongoURI:   uri,
+		database:   database,
 	}, nil
 }
 

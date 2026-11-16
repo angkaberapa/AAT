@@ -28,6 +28,7 @@ type Config struct {
 	// Canonical Store (owned exclusively by this service)
 	MongoURI string
 	MongoDB  string
+	AuditToken string
 
 	// Message broker
 	KafkaBootstrapServers string
@@ -67,8 +68,9 @@ func Load() (Config, error) {
 		PollInterval:    e.Seconds("POLL_INTERVAL_SECONDS", 3*time.Second),
 		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 5000*time.Millisecond),
 
-		MongoURI: e.Required("MONGO_URI"),
-		MongoDB:  e.String("MONGO_DB", "bnpb"),
+		MongoURI:   e.Required("MONGO_URI"),
+		MongoDB:    e.String("MONGO_DB", "bnpb"),
+		AuditToken: e.Required("AUDIT_TOKEN"),
 
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),

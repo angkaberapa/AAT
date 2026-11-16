@@ -42,6 +42,8 @@ spec:
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: BMKG_API_KEY } }
             - name: PVMBG_TOKEN
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: PVMBG_TOKEN } }
+            - name: AUDIT_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: AUDIT_TOKEN } }
             - name: MONGO_ROOT_USER
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
             - name: MONGO_ROOT_PASSWORD
@@ -104,6 +106,9 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
