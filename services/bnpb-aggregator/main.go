@@ -11,6 +11,7 @@ import (
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/api"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/audit"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/catalog"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
@@ -49,6 +50,16 @@ func main() {
 		logger.Error("canonical store", "error", err.Error())
 		os.Exit(1)
 	}
+	volcanoes, err := reference.Volcanoes()
+	if err != nil {
+		logger.Error("volcano reference table", "error", err.Error())
+		os.Exit(1)
+	}
+	mapper, err := mapping.NewMapper(volcanoes)
+	if err != nil {
+		logger.Error("mapper", "error", err.Error())
+		os.Exit(1)
+	}
 
 	//P2 M2: status kebaruan per sumber dibaca dari storage bersama, jadi leader & follower sama.
 	statuses := ingest.NewSharedStatus(func(ctx context.Context) ([]ingest.Record, error) {
@@ -62,6 +73,7 @@ func main() {
 		location = audit.NewUnavailableLocator(err)
 	}
 	audit.Register(mux, logger, st, location, cfg.AuditToken)
+	catalog.Register(mux, logger, mapper, st, cfg.AuditToken)
 
 	//P5: producer Kafka + relay outbox (relay hanya jalan di leader).
 	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)
@@ -70,17 +82,6 @@ func main() {
 		os.Exit(1)
 	}
 	relay := publisher.NewRelay(st, producer, logger, cfg.OutboxRelayInterval, cfg.OutboxBatchSize)
-
-	volcanoes, err := reference.Volcanoes()
-	if err != nil {
-		logger.Error("volcano reference table", "error", err.Error())
-		os.Exit(1)
-	}
-	mapper, err := mapping.NewMapper(volcanoes)
-	if err != nil {
-		logger.Error("mapper", "error", err.Error())
-		os.Exit(1)
-	}
 
 	httpClient := core.NewHTTPClient(logger, cfg.UpstreamTimeout)
 	// P2 M2 kriteria 2: log upstream bisa menunjukkan instance mana yang memanggil.
