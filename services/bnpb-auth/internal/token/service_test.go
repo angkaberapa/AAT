@@ -20,7 +20,7 @@ func TestIssueUsesIdentitySpecificScopes(t *testing.T) {
 		scope  string
 	}{
 		{id: "media", secret: "media-secret", scope: ScopeHazardsSummary},
-		{id: "field", secret: "field-secret", scope: ScopeHazardsRead},
+		{id: "field", secret: "field-secret", scope: ScopeHazardsRead + " " + ScopeFieldReportsWrite},
 		{id: "ops", secret: "ops-secret", scope: ScopeHazardsRead},
 	}
 	for _, test := range tests {
@@ -155,7 +155,7 @@ func newTestService(t *testing.T) *Service {
 		RefreshTTL:     10 * time.Minute,
 		Clients: []Client{
 			{ID: "media", Secret: "media-secret", Scope: ScopeHazardsSummary},
-			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead},
+			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead + " " + ScopeFieldReportsWrite},
 			{ID: "ops", Secret: "ops-secret", Scope: ScopeHazardsRead},
 		},
 	})

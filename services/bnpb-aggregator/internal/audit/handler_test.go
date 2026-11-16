@@ -34,6 +34,14 @@ type fakeLocator struct {
 	id       string
 }
 
+func (f *fakeReader) AuditUnprocessed(_ context.Context, _ store.UnprocessedFilter) (store.UnprocessedPage, error) {
+	return store.UnprocessedPage{Items: []store.UnprocessedMessage{}}, nil
+}
+
+func (f *fakeReader) GetUnprocessed(_ context.Context, _ string) (*store.UnprocessedMessage, error) {
+	return nil, nil
+}
+
 func (f *fakeLocator) Locate(_ context.Context, id string) (*Location, error) {
 	f.calls++
 	f.id = id

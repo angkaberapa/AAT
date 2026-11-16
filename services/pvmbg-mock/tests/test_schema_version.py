@@ -53,7 +53,7 @@ async def test_switches_report_schema_without_restart() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [{}, {"version": 0}, {"version": 3}, {"version": "2"}])
+@pytest.mark.parametrize("payload", [{}, {"version": 0}, {"version": 6}, {"version": "2"}])
 async def test_rejects_invalid_schema_versions(payload: dict[str, object]) -> None:
     application = create_app()
     async with (
@@ -66,3 +66,54 @@ async def test_rejects_invalid_schema_versions(payload: dict[str, object]) -> No
         response = await client.post("/admin/schema-version", json=payload)
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "present", "absent", "expected_type"),
+    [
+        (3, "level", "alert_level", str),
+        (4, "eruption_count_24h", "", str),
+        (5, "alert_level", "eruption_count_24h", str),
+    ],
+)
+async def test_incompatible_schema_modes(
+    version: int,
+    present: str,
+    absent: str,
+    expected_type: type[object],
+) -> None:
+    application = create_app()
+    async with (
+        application.router.lifespan_context(application),
+        AsyncClient(transport=ASGITransport(app=application), base_url="http://test") as client,
+    ):
+        changed = await client.post("/admin/schema-version", json={"version": version})
+        response = await client.get("/volcanic-reports", headers=AUTHORIZATION)
+
+    assert changed.status_code == 200
+    report = response.json()["data"][0]
+    assert present in report
+    assert isinstance(report[present], expected_type)
+    if absent:
+        assert absent not in report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["truncated", "deep", "invalid_utf8", "oversized"])
+async def test_broken_payload_modes_can_be_changed_at_runtime(mode: str) -> None:
+    application = create_app()
+    async with (
+        application.router.lifespan_context(application),
+        AsyncClient(transport=ASGITransport(app=application), base_url="http://test") as client,
+    ):
+        changed = await client.post("/admin/payload-mode", json={"mode": mode})
+        broken = await client.get("/volcanic-reports", headers=AUTHORIZATION)
+        restored = await client.post("/admin/payload-mode", json={"mode": "normal"})
+        healthy = await client.get("/volcanic-reports", headers=AUTHORIZATION)
+
+    assert changed.status_code == 200
+    assert broken.content != healthy.content
+    assert restored.json() == {"mode": "normal"}
+    assert healthy.status_code == 200
+    assert len(healthy.json()["data"]) == 20
