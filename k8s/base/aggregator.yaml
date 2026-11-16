@@ -44,6 +44,10 @@ spec:
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: PVMBG_TOKEN } }
             - name: AUDIT_TOKEN
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: AUDIT_TOKEN } }
+            - name: COASTAL_INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: COASTAL_INGEST_TOKEN } }
+            - name: FIELD_REPORT_INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: FIELD_REPORT_INGEST_TOKEN } }
             - name: MONGO_ROOT_USER
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
             - name: MONGO_ROOT_PASSWORD

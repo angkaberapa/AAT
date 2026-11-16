@@ -73,6 +73,9 @@ spec:
           image: aat/bnpb-api:dev
           ports: [{ containerPort: 8080, name: http }]
           envFrom: [{ configMapRef: { name: bnpb-api-config } }]
+          env:
+            - name: FIELD_REPORT_INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: FIELD_REPORT_INGEST_TOKEN } }
           readinessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 3
