@@ -27,6 +27,8 @@ type Reader interface {
 	AuditEvents(context.Context, store.AuditFilter) (store.AuditPage, error)
 	AuditChecksum(context.Context, domain.Source) (store.ChecksumResult, error)
 	Analytics(context.Context, store.AnalyticsFilter) (store.AnalyticsResult, error)
+	AuditUnprocessed(context.Context, store.UnprocessedFilter) (store.UnprocessedPage, error)
+	GetUnprocessed(context.Context, string) (*store.UnprocessedMessage, error)
 }
 
 type Locator interface {
@@ -133,6 +135,46 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, locator Lo
 			UnavailableUnits: nonNilStrings(result.UnavailableUnits),
 		})
 	}))
+
+	mux.HandleFunc("GET /internal/audit/unprocessed", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		filter, problem := parseUnprocessedQuery(r)
+		if problem != "" {
+			writeError(w, http.StatusBadRequest, "bad_request", problem)
+			return
+		}
+		page, err := reader.AuditUnprocessed(r.Context(), filter)
+		if err != nil {
+			logger.ErrorContext(r.Context(), "audit unprocessed failed", "error", err.Error())
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "unprocessed storage is temporarily unavailable")
+			return
+		}
+		items := make([]unprocessedItem, 0, len(page.Items))
+		for _, item := range page.Items {
+			items = append(items, unprocessedItem{
+				MessageID: item.MessageID, Source: item.Source, ReceivedAt: item.ReceivedAt.UTC(),
+				Reason: item.Reason, Retryable: item.Retryable, Attempts: item.Attempts, Status: item.Status,
+			})
+		}
+		core.WriteJSON(w, http.StatusOK, unprocessedResponse{Items: items, NextCursor: encodeUnprocessedCursor(page.Next, filter)})
+	}))
+
+	mux.HandleFunc("GET /internal/audit/unprocessed/{message_id}", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		message, err := reader.GetUnprocessed(r.Context(), r.PathValue("message_id"))
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "unprocessed storage is temporarily unavailable")
+			return
+		}
+		if message == nil {
+			writeError(w, http.StatusNotFound, "not_found", "message_id tidak ditemukan")
+			return
+		}
+		core.WriteJSON(w, http.StatusOK, map[string]any{
+			"message_id": message.MessageID, "source": message.Source, "source_ref_id": message.SourceRefID,
+			"received_at": message.ReceivedAt.UTC(), "reason": message.Reason, "retryable": message.Retryable,
+			"attempts": message.Attempts, "status": message.Status, "content_type": message.ContentType,
+			"raw_payload_base64": base64.StdEncoding.EncodeToString(message.RawPayload),
+		})
+	}))
 }
 
 type eventsResponse struct {
@@ -164,6 +206,29 @@ type analyticsResponse struct {
 	Partial          bool               `json:"partial"`
 	Degraded         bool               `json:"degraded"`
 	UnavailableUnits []string           `json:"unavailable_units"`
+}
+
+type unprocessedItem struct {
+	MessageID  string    `json:"message_id"`
+	Source     string    `json:"source"`
+	ReceivedAt time.Time `json:"received_at"`
+	Reason     string    `json:"reason"`
+	Retryable  bool      `json:"retryable"`
+	Attempts   int       `json:"attempts"`
+	Status     string    `json:"status"`
+}
+
+type unprocessedResponse struct {
+	Items      []unprocessedItem `json:"items"`
+	NextCursor *string           `json:"next_cursor"`
+}
+
+type unprocessedCursorPayload struct {
+	Version    int       `json:"v"`
+	Kind       string    `json:"kind"`
+	Source     string    `json:"source,omitempty"`
+	ReceivedAt time.Time `json:"received_at"`
+	MessageID  string    `json:"message_id"`
 }
 
 type eventsCursorPayload struct {
@@ -243,6 +308,60 @@ func parseAnalyticsQuery(r *http.Request) (store.AnalyticsFilter, string) {
 		return filter, "from must not be later than to"
 	}
 	return filter, ""
+}
+
+func parseUnprocessedQuery(r *http.Request) (store.UnprocessedFilter, string) {
+	query := r.URL.Query()
+	filter := store.UnprocessedFilter{Limit: defaultLimit, Source: query.Get("source")}
+	if filter.Source != "" && !domain.Source(filter.Source).Valid() {
+		return filter, "invalid source"
+	}
+	if raw := query.Get("limit"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > maxLimit {
+			return filter, "invalid limit"
+		}
+		filter.Limit = limit
+	}
+	if raw := query.Get("cursor"); raw != "" {
+		payload, err := decodeUnprocessedCursor(raw)
+		if err != nil || payload.Source != filter.Source {
+			return filter, "invalid cursor or cursor filters do not match"
+		}
+		filter.Cursor = &store.UnprocessedCursor{ReceivedAt: payload.ReceivedAt, MessageID: payload.MessageID}
+	}
+	return filter, ""
+}
+
+func encodeUnprocessedCursor(cursor *store.UnprocessedCursor, filter store.UnprocessedFilter) *string {
+	if cursor == nil {
+		return nil
+	}
+	raw, err := json.Marshal(unprocessedCursorPayload{
+		Version: 1, Kind: "audit-unprocessed", Source: filter.Source,
+		ReceivedAt: cursor.ReceivedAt.UTC(), MessageID: cursor.MessageID,
+	})
+	if err != nil {
+		return nil
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	return &encoded
+}
+
+func decodeUnprocessedCursor(raw string) (unprocessedCursorPayload, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return unprocessedCursorPayload{}, err
+	}
+	var payload unprocessedCursorPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return payload, err
+	}
+	if payload.Version != 1 || payload.Kind != "audit-unprocessed" || payload.ReceivedAt.IsZero() || payload.MessageID == "" {
+		return payload, errors.New("unsupported or incomplete cursor")
+	}
+	payload.ReceivedAt = payload.ReceivedAt.UTC()
+	return payload, nil
 }
 
 func encodeEventsCursor(cursor *store.AuditCursor, filter store.AuditFilter) *string {

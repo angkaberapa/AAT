@@ -15,10 +15,12 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/fieldreports"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/ingest"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/leader"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/mapping"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/publisher"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/quarantine"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/reference"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/bmkg"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/pvmbg"
@@ -74,6 +76,14 @@ func main() {
 	}
 	audit.Register(mux, logger, st, location, cfg.AuditToken)
 	catalog.Register(mux, logger, mapper, st, cfg.AuditToken)
+	quarantine.RegisterUnprocessedIngest(mux, logger, st, cfg.CoastalIngestToken)
+	fieldreports.Register(mux, logger, st, cfg.FieldReportIngestToken, cfg.AuditToken)
+	quarantine.RegisterReplay(mux, logger, st, mapper, cfg.AuditToken, cfg.InstanceID+"-manual-replay", cfg.PVMBGCompatibilityVersion)
+	fieldWorkerDone := make(chan struct{})
+	go func() {
+		defer close(fieldWorkerDone)
+		fieldreports.RunWorker(ctx, logger, st, cfg.InstanceID, cfg.FieldReportWorkerInterval, cfg.FieldReportLeaseDuration, cfg.FieldReportProcessingDelay)
+	}()
 
 	//P5: producer Kafka + relay outbox (relay hanya jalan di leader).
 	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)
@@ -117,6 +127,7 @@ func main() {
 	//lease dilepas) sebelum producer dan store ditutup.
 	stop()
 	<-leaderDone
+	<-fieldWorkerDone
 	producer.Close()
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -222,6 +233,8 @@ func (t *termRunner) run(leadCtx context.Context) {
 		logger.ErrorContext(ctx, "pvmbg client", "error", err.Error())
 		return
 	}
+	pvmbgClient.SetFailureSink(quarantine.NewFailureSink(t.store))
+	pvmbgClient.SetCompatibilityVersion(t.cfg.PVMBGCompatibilityVersion)
 
 	relayDone := make(chan struct{})
 	go func() {

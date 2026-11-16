@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
-from .models import AlertLevel, OutageMode, SchemaVersion, VolcanicReport, VolcanoId
+from .models import AlertLevel, OutageMode, PayloadMode, SchemaVersion, VolcanicReport, VolcanoId
 
 SEED_REPORT_COUNT = 20
 
@@ -52,6 +52,7 @@ class RuntimeState:
 
         self._reports = sorted(copied_reports, key=lambda report: report.reported_at)
         self._schema_version: SchemaVersion = 1
+        self._payload_mode = PayloadMode.NORMAL
         self._outage_enabled = False
         self._outage_mode = OutageMode.ERROR
         self._outage_cleared = asyncio.Event()
@@ -103,10 +104,18 @@ class RuntimeState:
 
     async def set_schema_version(self, version: SchemaVersion) -> None:
         """Change the active response schema version"""
-        if version not in (1, 2):
-            raise ValueError("schema version must be 1 or 2")
+        if version not in (1, 2, 3, 4, 5):
+            raise ValueError("schema version must be between 1 and 5")
         async with self._lock:
             self._schema_version = version
+
+    async def get_payload_mode(self) -> PayloadMode:
+        async with self._lock:
+            return self._payload_mode
+
+    async def set_payload_mode(self, mode: PayloadMode) -> None:
+        async with self._lock:
+            self._payload_mode = mode
 
     async def get_outage(self) -> tuple[bool, OutageMode]:
         """Return the current controlled-outage state"""

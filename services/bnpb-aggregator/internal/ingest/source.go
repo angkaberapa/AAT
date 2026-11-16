@@ -17,6 +17,22 @@ type FetchCommitter interface {
 	CommitFetch()
 }
 
+type RawFailure struct {
+	MessageID   string
+	Source      domain.Source
+	SourceRefID string
+	ReceivedAt  time.Time
+	Reason      string
+	Retryable   bool
+	Status      string
+	RawPayload  []byte
+	ContentType string
+}
+
+type FailureSink interface {
+	StoreRawFailure(context.Context, RawFailure) error
+}
+
 type ErrorKind string
 
 const (

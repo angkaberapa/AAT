@@ -15,20 +15,26 @@ type Config struct {
 	Port        int
 
 	// Upstream sources. Each has its own credential; they must never be swapped.
-	BMKGBaseURL     string
-	BMKGAPIKey      string
-	PVMBGBaseURL    string
-	PVMBGToken      string
-	PollInterval    time.Duration
-	UpstreamTimeout time.Duration
+	BMKGBaseURL               string
+	BMKGAPIKey                string
+	PVMBGBaseURL              string
+	PVMBGToken                string
+	PVMBGCompatibilityVersion int
+	PollInterval              time.Duration
+	UpstreamTimeout           time.Duration
 	// A source with no successful poll for this long is reported stale (P2).
 	// Default: 3 poll intervals + one upstream timeout.
 	SourceStaleAfter time.Duration
 
 	// Canonical Store (owned exclusively by this service)
-	MongoURI string
-	MongoDB  string
-	AuditToken string
+	MongoURI                   string
+	MongoDB                    string
+	AuditToken                 string
+	CoastalIngestToken         string
+	FieldReportIngestToken     string
+	FieldReportWorkerInterval  time.Duration
+	FieldReportLeaseDuration   time.Duration
+	FieldReportProcessingDelay time.Duration
 
 	// Message broker
 	KafkaBootstrapServers string
@@ -61,21 +67,25 @@ func Load() (Config, error) {
 		LogLevel:    e.String("LOG_LEVEL", "INFO"),
 		Port:        e.Int("PORT", 8000),
 
-		BMKGBaseURL:     e.String("BMKG_BASE_URL", "http://bmkg-mock:8081"),
-		BMKGAPIKey:      e.Required("BMKG_API_KEY"),
-		PVMBGBaseURL:    e.String("PVMBG_BASE_URL", "http://pvmbg-mock:8082"),
-		PVMBGToken:      e.Required("PVMBG_TOKEN"),
-		PollInterval:    e.Seconds("POLL_INTERVAL_SECONDS", 3*time.Second),
-		UpstreamTimeout: e.Millis("UPSTREAM_TIMEOUT_MS", 5000*time.Millisecond),
+		BMKGBaseURL:               e.String("BMKG_BASE_URL", "http://bmkg-mock:8081"),
+		BMKGAPIKey:                e.Required("BMKG_API_KEY"),
+		PVMBGBaseURL:              e.String("PVMBG_BASE_URL", "http://pvmbg-mock:8082"),
+		PVMBGToken:                e.Required("PVMBG_TOKEN"),
+		PVMBGCompatibilityVersion: e.Int("PVMBG_COMPATIBILITY_VERSION", 2),
+		PollInterval:              e.Seconds("POLL_INTERVAL_SECONDS", 3*time.Second),
+		UpstreamTimeout:           e.Millis("UPSTREAM_TIMEOUT_MS", 5000*time.Millisecond),
 
-		MongoURI:   e.Required("MONGO_URI"),
-		MongoDB:    e.String("MONGO_DB", "bnpb"),
-		AuditToken: e.Required("AUDIT_TOKEN"),
+		MongoURI:               e.Required("MONGO_URI"),
+		MongoDB:                e.String("MONGO_DB", "bnpb"),
+		AuditToken:             e.Required("AUDIT_TOKEN"),
+		CoastalIngestToken:     e.Required("COASTAL_INGEST_TOKEN"),
+		FieldReportIngestToken: e.Required("FIELD_REPORT_INGEST_TOKEN"),
 
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),
 	}
 	c.KafkaTopicPartitions = e.Int("KAFKA_TOPIC_PARTITIONS", 3)
+	e.Check(c.PVMBGCompatibilityVersion >= 1 && c.PVMBGCompatibilityVersion <= 5, "PVMBG_COMPATIBILITY_VERSION must be between 1 and 5")
 	retentionHours := e.Int("KAFKA_TOPIC_RETENTION_HOURS", 168)
 	e.Check(retentionHours >= 1, "KAFKA_TOPIC_RETENTION_HOURS must be at least 1")
 	c.KafkaTopicRetention = time.Duration(retentionHours) * time.Hour
@@ -88,6 +98,12 @@ func Load() (Config, error) {
 	e.Check(c.SnapshotDefaultLimit >= 1, "SNAPSHOT_DEFAULT_LIMIT must be at least 1")
 	e.Check(c.SnapshotDefaultLimit <= c.SnapshotMaxLimit, "SNAPSHOT_DEFAULT_LIMIT must not exceed SNAPSHOT_MAX_LIMIT")
 	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
+	c.FieldReportWorkerInterval = e.Millis("FIELD_REPORT_WORKER_INTERVAL_MS", 250*time.Millisecond)
+	c.FieldReportLeaseDuration = e.Seconds("FIELD_REPORT_LEASE_SECONDS", 30*time.Second)
+	c.FieldReportProcessingDelay = e.Millis("FIELD_REPORT_PROCESSING_DELAY_MS", 0)
+	e.Check(c.FieldReportWorkerInterval > 0, "FIELD_REPORT_WORKER_INTERVAL_MS must be positive")
+	e.Check(c.FieldReportLeaseDuration > c.FieldReportWorkerInterval, "FIELD_REPORT_LEASE_SECONDS must exceed worker interval")
+	e.Check(c.FieldReportProcessingDelay >= 0, "FIELD_REPORT_PROCESSING_DELAY_MS must not be negative")
 
 	c.LeaderElection = e.String("LEADER_ELECTION_ENABLED", "false") == "true"
 	c.LeaseName = e.String("LEADER_LEASE_NAME", "bnpb-aggregator-ingest")

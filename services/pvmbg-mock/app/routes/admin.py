@@ -5,6 +5,8 @@ from fastapi import APIRouter, Request
 from ..models import (
     OutageRequest,
     OutageResponse,
+    PayloadModeRequest,
+    PayloadModeResponse,
     SchemaVersionRequest,
     SchemaVersionResponse,
 )
@@ -28,6 +30,15 @@ async def set_schema_version(
         schema_version=payload.version,
     )
     return SchemaVersionResponse(schema_version=payload.version)
+
+
+@router.post("/payload-mode", response_model=PayloadModeResponse)
+async def set_payload_mode(payload: PayloadModeRequest, request: Request) -> PayloadModeResponse:
+    """Select a malformed wire response used by P3 robustness tests."""
+    runtime: RuntimeState = request.app.state.runtime
+    await runtime.set_payload_mode(payload.mode)
+    log_event(logging.INFO, "payload mode changed", payload_mode=payload.mode.value)
+    return PayloadModeResponse(mode=payload.mode)
 
 
 @router.post(

@@ -24,12 +24,14 @@ const (
 )
 
 type Store struct {
-	client     *mongo.Client
-	events     *mongo.Collection
-	leadership *mongo.Collection // P2 M2: dokumen fence (epoch leader)
-	statuses   *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
-	mongoURI   string
-	database   string
+	client       *mongo.Client
+	events       *mongo.Collection
+	leadership   *mongo.Collection // P2 M2: dokumen fence (epoch leader)
+	statuses     *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
+	unprocessed  *mongo.Collection // P3: raw messages that could not be processed
+	fieldReports *mongo.Collection // P3: durable Tim Lapangan inbox
+	mongoURI     string
+	database     string
 }
 
 const serverSelectionTimeout = 3 * time.Second
@@ -65,13 +67,25 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 	}
 
 	db := client.Database(database)
+	unprocessed := db.Collection(unprocessedCollection)
+	if _, err := unprocessed.Indexes().CreateMany(ctx, unprocessedIndexes()); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("create unprocessed indexes: %w", err)
+	}
+	fieldReports := db.Collection(fieldReportsCollection)
+	if _, err := fieldReports.Indexes().CreateMany(ctx, fieldReportIndexes()); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("create field report indexes: %w", err)
+	}
 	return &Store{
-		client:     client,
-		events:     events,
-		leadership: db.Collection(leadershipCollection),
-		statuses:   db.Collection(sourceStatusCollect),
-		mongoURI:   uri,
-		database:   database,
+		client:       client,
+		events:       events,
+		leadership:   db.Collection(leadershipCollection),
+		statuses:     db.Collection(sourceStatusCollect),
+		unprocessed:  unprocessed,
+		fieldReports: fieldReports,
+		mongoURI:     uri,
+		database:     database,
 	}, nil
 }
 
