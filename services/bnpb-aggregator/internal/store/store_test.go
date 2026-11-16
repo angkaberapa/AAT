@@ -3,6 +3,7 @@ package store
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -39,6 +40,23 @@ func TestEventIndexesSupportShardRoutingAndStableOrdering(t *testing.T) {
 	naturalKeyOptions := resolveIndexOptions(t, indexes[1].Options)
 	if naturalKeyOptions.Unique != nil && *naturalKeyOptions.Unique {
 		t.Fatal("source/source_ref_id index must not claim unsupported global uniqueness")
+	}
+}
+
+func TestLatestCursorPredicateUsesExclusiveStableBoundary(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	got := latestCursorPredicate(LatestCursor{OccurredAt: when, HazardID: "HZ-8000"})
+	want := bson.A{
+		bson.D{{Key: "occurred_at", Value: bson.D{{Key: "$lt", Value: when}}}},
+		bson.D{
+			{Key: "occurred_at", Value: when},
+			{Key: "hazard_id", Value: bson.D{{Key: "$lt", Value: "HZ-8000"}}},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("latestCursorPredicate() = %#v, want %#v", got, want)
 	}
 }
 

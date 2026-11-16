@@ -148,14 +148,35 @@ type Filter struct {
 	Source     domain.Source
 	HazardType domain.HazardType
 	Severity   domain.Severity
+	Order      Order
+	Cursor     *LatestCursor
 	//Limit > 0 batasi ukuran snapshot (P2): Limit event TERBARU, tetap urut naik.
 	//Diabaikan kalau Since diisi: banyak event bisa punya ingested_at yang sama persis
 	//(satu batch), jadi motong hasil inkremental bikin event dengan timestamp kembar kelewat.
 	Limit int
 }
 
+type Order string
+
+const OrderLatest Order = "latest"
+
+type LatestCursor struct {
+	OccurredAt time.Time
+	HazardID   string
+}
+
+type Page struct {
+	Items []domain.HazardEvent
+	Next  *LatestCursor
+}
+
 // List balikin event yang match, urut dari yang paling lama di-ingest. hasilnya gak pernah nil, biar caller gak perlu cek.
 func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error) {
+	page, err := s.ListPage(ctx, f)
+	return page.Items, err
+}
+
+func (s *Store) ListPage(ctx context.Context, f Filter) (Page, error) {
 	filter := bson.D{}
 
 	if f.Since != nil {
@@ -173,6 +194,9 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 	if f.Severity != "" {
 		filter = append(filter, bson.E{Key: "severity", Value: f.Severity})
 	}
+	if f.Order == OrderLatest {
+		return s.listLatestPage(ctx, filter, f)
+	}
 
 	newestFirst := f.Limit > 0 && f.Since == nil
 	opts := options.Find().SetSort(bson.D{{Key: "ingested_at", Value: 1}})
@@ -183,18 +207,60 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 
 	cur, err := s.events.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("find hazard events: %w", err)
+		return Page{}, fmt.Errorf("find hazard events: %w", err)
 	}
 
 	//sengaja di-init, biar json-nya `[]` bukan `null` kalau kosong.
 	events := []domain.HazardEvent{}
 	if err := cur.All(ctx, &events); err != nil {
-		return nil, fmt.Errorf("decode hazard events: %w", err)
+		return Page{}, fmt.Errorf("decode hazard events: %w", err)
 	}
 	if newestFirst {
 		slices.Reverse(events)
 	}
-	return events, nil
+	return Page{Items: events}, nil
+}
+
+func (s *Store) listLatestPage(ctx context.Context, filter bson.D, f Filter) (Page, error) {
+	if f.Limit <= 0 {
+		return Page{}, errors.New("latest hazard page requires a positive limit")
+	}
+	if f.Cursor != nil {
+		filter = append(filter, bson.E{Key: "$or", Value: latestCursorPredicate(*f.Cursor)})
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}}).
+		SetLimit(int64(f.Limit + 1))
+	cur, err := s.events.Find(ctx, filter, opts)
+	if err != nil {
+		return Page{}, fmt.Errorf("find latest hazard events: %w", err)
+	}
+
+	events := []domain.HazardEvent{}
+	if err := cur.All(ctx, &events); err != nil {
+		return Page{}, fmt.Errorf("decode latest hazard events: %w", err)
+	}
+	if len(events) <= f.Limit {
+		return Page{Items: events}, nil
+	}
+
+	events = events[:f.Limit]
+	last := events[len(events)-1]
+	return Page{
+		Items: events,
+		Next:  &LatestCursor{OccurredAt: last.OccurredAt, HazardID: last.HazardID},
+	}, nil
+}
+
+func latestCursorPredicate(cursor LatestCursor) bson.A {
+	return bson.A{
+		bson.D{{Key: "occurred_at", Value: bson.D{{Key: "$lt", Value: cursor.OccurredAt}}}},
+		bson.D{
+			{Key: "occurred_at", Value: cursor.OccurredAt},
+			{Key: "hazard_id", Value: bson.D{{Key: "$lt", Value: cursor.HazardID}}},
+		},
+	}
 }
 
 // Get by hazard_id. return (nil, nil) kalau gak ketemu, caller yang mutusin mau 404 atau bukan.

@@ -15,11 +15,82 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/store"
 )
 
-type fakeReader struct{ lastFilter store.Filter }
+type fakeReader struct {
+	lastFilter store.Filter
+	next       *store.LatestCursor
+}
 
-func (r *fakeReader) List(_ context.Context, f store.Filter) ([]domain.HazardEvent, error) {
+func (r *fakeReader) ListPage(_ context.Context, f store.Filter) (store.Page, error) {
 	r.lastFilter = f
-	return []domain.HazardEvent{{HazardID: "HZ-1", Source: domain.SourcePVMBG}}, nil
+	return store.Page{
+		Items: []domain.HazardEvent{{HazardID: "HZ-1", Source: domain.SourcePVMBG}},
+		Next:  r.next,
+	}, nil
+}
+
+func TestLatestCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := store.LatestCursor{
+		OccurredAt: time.Date(2026, 11, 16, 9, 30, 0, 123, time.UTC),
+		HazardID:   "HZ-7fff",
+	}
+	raw, ok := encodeLatestCursor(&want).(string)
+	if !ok || raw == "" {
+		t.Fatalf("encoded cursor = %#v", raw)
+	}
+	got, err := decodeLatestCursor(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.OccurredAt.Equal(want.OccurredAt) || got.HazardID != want.HazardID {
+		t.Fatalf("decoded cursor = %#v, want %#v", got, want)
+	}
+}
+
+func TestLatestPaginationIsExplicitAndReturnsCursor(t *testing.T) {
+	t.Parallel()
+
+	next := &store.LatestCursor{
+		OccurredAt: time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC),
+		HazardID:   "HZ-8000",
+	}
+	reader := &fakeReader{next: next}
+	mux := newTestMux(reader)
+
+	_, first := get(t, mux, "/hazards?sort=latest&limit=50")
+	raw, ok := first["next_cursor"].(string)
+	if !ok || raw == "" {
+		t.Fatalf("next_cursor = %#v", first["next_cursor"])
+	}
+	_, second := get(t, mux, "/hazards?sort=latest&limit=50&cursor="+raw)
+	if second["next_cursor"] == nil {
+		// The fake returns the same next boundary; the purpose here is parsing and forwarding it.
+		t.Fatal("next_cursor unexpectedly missing")
+	}
+	if reader.lastFilter.Order != store.OrderLatest || reader.lastFilter.Cursor == nil {
+		t.Fatalf("filter = %#v", reader.lastFilter)
+	}
+	if !reader.lastFilter.Cursor.OccurredAt.Equal(next.OccurredAt) || reader.lastFilter.Cursor.HazardID != next.HazardID {
+		t.Fatalf("decoded filter cursor = %#v, want %#v", reader.lastFilter.Cursor, next)
+	}
+}
+
+func TestLatestPaginationRejectsInvalidCombinations(t *testing.T) {
+	t.Parallel()
+
+	mux := newTestMux(&fakeReader{})
+	for _, target := range []string{
+		"/hazards?cursor=not-a-cursor",
+		"/hazards?sort=latest&cursor=not-a-cursor",
+		"/hazards?sort=oldest",
+		"/hazards?sort=latest&since=2026-11-16T09:00:00Z",
+	} {
+		rec, _ := get(t, mux, target)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", target, rec.Code)
+		}
+	}
 }
 
 func (r *fakeReader) Get(_ context.Context, id string) (*domain.HazardEvent, error) {
