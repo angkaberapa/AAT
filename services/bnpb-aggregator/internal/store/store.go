@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sort"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -174,8 +175,10 @@ type LatestCursor struct {
 }
 
 type Page struct {
-	Items []domain.HazardEvent
-	Next  *LatestCursor
+	Items            []domain.HazardEvent
+	Next             *LatestCursor
+	Partial          bool
+	UnavailableUnits []string
 }
 
 // List balikin event yang match, urut dari yang paling lama di-ingest. hasilnya gak pernah nil, biar caller gak perlu cek.
@@ -203,9 +206,29 @@ func (s *Store) ListPage(ctx context.Context, f Filter) (Page, error) {
 		filter = append(filter, bson.E{Key: "severity", Value: f.Severity})
 	}
 	if f.Order == OrderLatest {
-		return s.listLatestPage(ctx, filter, f)
+		page, err := listLatestPageFromCollection(ctx, s.events, filter, f)
+		if err == nil {
+			return page, nil
+		}
+		fallback, fallbackErr := s.listPageByShard(ctx, filter, f)
+		if fallbackErr == nil {
+			return fallback, nil
+		}
+		return Page{}, fmt.Errorf("find latest hazard events: %w (fallback: %v)", err, fallbackErr)
 	}
 
+	page, err := listPageFromCollection(ctx, s.events, filter, f)
+	if err == nil {
+		return page, nil
+	}
+	fallback, fallbackErr := s.listPageByShard(ctx, filter, f)
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return Page{}, fmt.Errorf("find hazard events: %w (fallback: %v)", err, fallbackErr)
+}
+
+func listPageFromCollection(ctx context.Context, collection *mongo.Collection, filter bson.D, f Filter) (Page, error) {
 	newestFirst := f.Limit > 0 && f.Since == nil
 	opts := options.Find().SetSort(bson.D{{Key: "ingested_at", Value: 1}})
 	if newestFirst {
@@ -213,7 +236,7 @@ func (s *Store) ListPage(ctx context.Context, f Filter) (Page, error) {
 		opts.SetSort(bson.D{{Key: "ingested_at", Value: -1}}).SetLimit(int64(f.Limit))
 	}
 
-	cur, err := s.events.Find(ctx, filter, opts)
+	cur, err := collection.Find(ctx, filter, opts)
 	if err != nil {
 		return Page{}, fmt.Errorf("find hazard events: %w", err)
 	}
@@ -229,7 +252,7 @@ func (s *Store) ListPage(ctx context.Context, f Filter) (Page, error) {
 	return Page{Items: events}, nil
 }
 
-func (s *Store) listLatestPage(ctx context.Context, filter bson.D, f Filter) (Page, error) {
+func listLatestPageFromCollection(ctx context.Context, collection *mongo.Collection, filter bson.D, f Filter) (Page, error) {
 	if f.Limit <= 0 {
 		return Page{}, errors.New("latest hazard page requires a positive limit")
 	}
@@ -240,7 +263,7 @@ func (s *Store) listLatestPage(ctx context.Context, filter bson.D, f Filter) (Pa
 	opts := options.Find().
 		SetSort(bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}}).
 		SetLimit(int64(f.Limit + 1))
-	cur, err := s.events.Find(ctx, filter, opts)
+	cur, err := collection.Find(ctx, filter, opts)
 	if err != nil {
 		return Page{}, fmt.Errorf("find latest hazard events: %w", err)
 	}
@@ -259,6 +282,69 @@ func (s *Store) listLatestPage(ctx context.Context, filter bson.D, f Filter) (Pa
 		Items: events,
 		Next:  &LatestCursor{OccurredAt: last.OccurredAt, HazardID: last.HazardID},
 	}, nil
+}
+
+func (s *Store) listPageByShard(ctx context.Context, filter bson.D, f Filter) (Page, error) {
+	mongos, err := s.isMongos(ctx)
+	if err != nil || !mongos {
+		return Page{}, errors.New("partial fallback requires mongos")
+	}
+	shards, err := s.listShards(ctx)
+	if err != nil {
+		return Page{}, err
+	}
+
+	items := []domain.HazardEvent{}
+	unavailable := []string{}
+	hasMore := false
+	for _, shard := range shards {
+		client, connectErr := s.connectShard(shard.ReplicaSet, shard.Hosts)
+		if connectErr != nil {
+			unavailable = append(unavailable, shard.ID)
+			continue
+		}
+		collection := client.Database(s.database).Collection(collectionName)
+		var part Page
+		if f.Order == OrderLatest {
+			part, err = listLatestPageFromCollection(ctx, collection, filter, f)
+		} else {
+			part, err = listPageFromCollection(ctx, collection, filter, f)
+		}
+		_ = client.Disconnect(context.WithoutCancel(ctx))
+		if err != nil {
+			unavailable = append(unavailable, shard.ID)
+			continue
+		}
+		hasMore = hasMore || part.Next != nil
+		items = append(items, part.Items...)
+	}
+	if len(items) == 0 && len(unavailable) == len(shards) {
+		return Page{}, errors.New("no shard is reachable")
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if f.Order == OrderLatest {
+			if items[i].OccurredAt.Equal(items[j].OccurredAt) {
+				return items[i].HazardID > items[j].HazardID
+			}
+			return items[i].OccurredAt.After(items[j].OccurredAt)
+		}
+		if items[i].IngestedAt.Equal(items[j].IngestedAt) {
+			return items[i].HazardID < items[j].HazardID
+		}
+		return items[i].IngestedAt.Before(items[j].IngestedAt)
+	})
+
+	page := Page{Items: items, Partial: len(unavailable) > 0, UnavailableUnits: unavailable}
+	if f.Order == OrderLatest && (len(items) > f.Limit || hasMore) {
+		if len(page.Items) > f.Limit {
+			page.Items = items[:f.Limit]
+		}
+		last := page.Items[len(page.Items)-1]
+		page.Next = &LatestCursor{OccurredAt: last.OccurredAt, HazardID: last.HazardID}
+	} else if f.Order != OrderLatest && f.Limit > 0 && f.Since == nil && len(items) > f.Limit {
+		page.Items = items[len(items)-f.Limit:]
+	}
+	return page, nil
 }
 
 func latestCursorPredicate(cursor LatestCursor) bson.A {

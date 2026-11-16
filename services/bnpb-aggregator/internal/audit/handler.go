@@ -26,6 +26,7 @@ const (
 type Reader interface {
 	AuditEvents(context.Context, store.AuditFilter) (store.AuditPage, error)
 	AuditChecksum(context.Context, domain.Source) (store.ChecksumResult, error)
+	Analytics(context.Context, store.AnalyticsFilter) (store.AnalyticsResult, error)
 }
 
 type Locator interface {
@@ -59,8 +60,8 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, locator Lo
 		core.WriteJSON(w, http.StatusOK, eventsResponse{
 			Items:            page.Items,
 			NextCursor:       encodeEventsCursor(page.Next, filter),
-			Partial:          false,
-			UnavailableUnits: []string{},
+			Partial:          page.Partial,
+			UnavailableUnits: nonNilStrings(page.UnavailableUnits),
 		})
 	}))
 
@@ -82,8 +83,8 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, locator Lo
 			Checksum:         result.Checksum,
 			Algorithm:        "sha256",
 			AsOf:             result.AsOf.UTC(),
-			Partial:          false,
-			UnavailableUnits: []string{},
+			Partial:          result.Partial,
+			UnavailableUnits: nonNilStrings(result.UnavailableUnits),
 		})
 	}))
 
@@ -105,6 +106,33 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, locator Lo
 		}
 		core.WriteJSON(w, http.StatusOK, location)
 	}))
+
+	mux.HandleFunc("GET /internal/analytics/data", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		filter, problem := parseAnalyticsQuery(r)
+		if problem != "" {
+			writeError(w, http.StatusBadRequest, "bad_request", problem)
+			return
+		}
+		result, err := reader.Analytics(r.Context(), filter)
+		if err != nil {
+			logger.ErrorContext(r.Context(), "canonical analytics failed", "error", err.Error())
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "analytics storage is temporarily unavailable")
+			return
+		}
+		core.WriteJSON(w, http.StatusOK, analyticsResponse{
+			From:             filter.From,
+			To:               filter.To,
+			Bucket:           filter.Bucket,
+			Total:            result.Total,
+			TimeSeries:       result.TimeSeries,
+			BySeverity:       result.BySeverity,
+			ByArea:           result.ByArea,
+			AsOf:             time.Now().UTC(),
+			Partial:          result.Partial,
+			Degraded:         result.Degraded,
+			UnavailableUnits: nonNilStrings(result.UnavailableUnits),
+		})
+	}))
 }
 
 type eventsResponse struct {
@@ -122,6 +150,20 @@ type checksumResponse struct {
 	AsOf             time.Time     `json:"as_of"`
 	Partial          bool          `json:"partial"`
 	UnavailableUnits []string      `json:"unavailable_units"`
+}
+
+type analyticsResponse struct {
+	From             *time.Time         `json:"from"`
+	To               *time.Time         `json:"to"`
+	Bucket           string             `json:"bucket"`
+	Total            int64              `json:"total"`
+	TimeSeries       []store.TimeCount  `json:"time_series"`
+	BySeverity       []store.NamedCount `json:"by_severity"`
+	ByArea           []store.NamedCount `json:"by_area"`
+	AsOf             time.Time          `json:"as_of"`
+	Partial          bool               `json:"partial"`
+	Degraded         bool               `json:"degraded"`
+	UnavailableUnits []string           `json:"unavailable_units"`
 }
 
 type eventsCursorPayload struct {
@@ -172,6 +214,33 @@ func parseEventsQuery(r *http.Request) (store.AuditFilter, string) {
 		filter.Source = payload.Source
 		filter.Since = payload.Since
 		filter.Cursor = &store.AuditCursor{IngestedAt: payload.IngestedAt, HazardID: payload.HazardID}
+	}
+	return filter, ""
+}
+
+func parseAnalyticsQuery(r *http.Request) (store.AnalyticsFilter, string) {
+	query := r.URL.Query()
+	filter := store.AnalyticsFilter{Bucket: query.Get("bucket")}
+	if filter.Bucket == "" {
+		filter.Bucket = "day"
+	}
+	if filter.Bucket != "hour" && filter.Bucket != "day" {
+		return filter, "invalid bucket, expected hour or day"
+	}
+	for key, target := range map[string]**time.Time{"from": &filter.From, "to": &filter.To} {
+		raw := query.Get(key)
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || !strings.HasSuffix(raw, "Z") {
+			return filter, "invalid " + key + ", expected ISO 8601 UTC"
+		}
+		normalized := parsed.UTC()
+		*target = &normalized
+	}
+	if filter.From != nil && filter.To != nil && filter.From.After(*filter.To) {
+		return filter, "from must not be later than to"
 	}
 	return filter, ""
 }
@@ -231,6 +300,13 @@ func validBearerToken(header, expected string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expected)) == 1
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

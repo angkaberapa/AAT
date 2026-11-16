@@ -17,11 +17,14 @@ import (
 const testToken = "audit-test-token"
 
 type fakeReader struct {
-	filter        store.AuditFilter
-	eventsCalls   int
-	checksumCalls int
-	page          store.AuditPage
-	checksum      store.ChecksumResult
+	filter          store.AuditFilter
+	eventsCalls     int
+	checksumCalls   int
+	analyticsCalls  int
+	page            store.AuditPage
+	checksum        store.ChecksumResult
+	analytics       store.AnalyticsResult
+	analyticsFilter store.AnalyticsFilter
 }
 
 type fakeLocator struct {
@@ -46,6 +49,12 @@ func (f *fakeReader) AuditEvents(_ context.Context, filter store.AuditFilter) (s
 func (f *fakeReader) AuditChecksum(_ context.Context, _ domain.Source) (store.ChecksumResult, error) {
 	f.checksumCalls++
 	return f.checksum, nil
+}
+
+func (f *fakeReader) Analytics(_ context.Context, filter store.AnalyticsFilter) (store.AnalyticsResult, error) {
+	f.analyticsCalls++
+	f.analyticsFilter = filter
+	return f.analytics, nil
 }
 
 func testMux(reader Reader) *http.ServeMux {
@@ -228,5 +237,66 @@ func TestAuditLocationValidatesAndReturnsNotFound(t *testing.T) {
 	}
 	if rec := request(t, mux, "/internal/audit/location?hazard_id=missing", testToken); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing event status = %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCanonicalAnalyticsResponseAndRange(t *testing.T) {
+	t.Parallel()
+
+	reader := &fakeReader{analytics: store.AnalyticsResult{
+		Total:      3,
+		TimeSeries: []store.TimeCount{{Bucket: time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC), HazardType: "SEISMIC", Count: 2}},
+		BySeverity: []store.NamedCount{{Name: "SIAGA", Count: 2}},
+		ByArea:     []store.NamedCount{{Name: "Bandung", Count: 2}},
+	}}
+	rec := request(t, testMux(reader), "/internal/analytics/data?from=2026-11-01T00:00:00Z&to=2026-11-16T00:00:00Z&bucket=day", testToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body analyticsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if reader.analyticsCalls != 1 || reader.analyticsFilter.From == nil || reader.analyticsFilter.To == nil ||
+		reader.analyticsFilter.Bucket != "day" || body.Total != 3 || body.Partial || body.UnavailableUnits == nil {
+		t.Fatalf("filter=%#v body=%#v", reader.analyticsFilter, body)
+	}
+}
+
+func TestCanonicalAnalyticsRejectsInvalidRange(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"/internal/analytics/data?bucket=week",
+		"/internal/analytics/data?from=2026-11-17T00:00:00Z&to=2026-11-16T00:00:00Z",
+		"/internal/analytics/data?from=not-a-time",
+	} {
+		if rec := request(t, testMux(&fakeReader{}), target, testToken); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d", target, rec.Code)
+		}
+	}
+}
+
+func TestPartialMetadataIsNotHidden(t *testing.T) {
+	t.Parallel()
+	reader := &fakeReader{
+		page:      store.AuditPage{Items: []domain.HazardEvent{}, Partial: true, UnavailableUnits: []string{"shard-1"}},
+		checksum:  store.ChecksumResult{Checksum: "partial-hash", AsOf: time.Now().UTC(), Partial: true, UnavailableUnits: []string{"shard-1"}},
+		analytics: store.AnalyticsResult{Partial: true, Degraded: true, UnavailableUnits: []string{"shard-1"}},
+	}
+
+	events := request(t, testMux(reader), "/internal/audit/events", testToken)
+	var eventsBody eventsResponse
+	if err := json.Unmarshal(events.Body.Bytes(), &eventsBody); err != nil || !eventsBody.Partial || len(eventsBody.UnavailableUnits) != 1 {
+		t.Fatalf("events body=%s err=%v", events.Body.String(), err)
+	}
+	checksum := request(t, testMux(reader), "/internal/audit/checksum?source=BMKG", testToken)
+	var checksumBody checksumResponse
+	if err := json.Unmarshal(checksum.Body.Bytes(), &checksumBody); err != nil || !checksumBody.Partial || len(checksumBody.UnavailableUnits) != 1 {
+		t.Fatalf("checksum body=%s err=%v", checksum.Body.String(), err)
+	}
+	analytics := request(t, testMux(reader), "/internal/analytics/data", testToken)
+	var analyticsBody analyticsResponse
+	if err := json.Unmarshal(analytics.Body.Bytes(), &analyticsBody); err != nil || !analyticsBody.Partial || !analyticsBody.Degraded || len(analyticsBody.UnavailableUnits) != 1 {
+		t.Fatalf("analytics body=%s err=%v", analytics.Body.String(), err)
 	}
 }

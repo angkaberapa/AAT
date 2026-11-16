@@ -9,6 +9,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
 
 // AuditReplica describes one currently reachable replica of the shard that owns an event.
@@ -23,6 +25,18 @@ type AuditLocationResult struct {
 	Shard    string
 	Replicas []AuditReplica
 	Partial  bool
+}
+
+type shardInfo struct {
+	ID         string
+	ReplicaSet string
+	Hosts      []string
+}
+
+type replicaMemberStatus struct {
+	Name     string  `bson:"name"`
+	StateStr string  `bson:"stateStr"`
+	Health   float64 `bson:"health"`
 }
 
 // AuditLocation asks mongos which shard owns hazardID, then reads that replica set's live
@@ -48,30 +62,19 @@ func (s *Store) AuditLocation(ctx context.Context, hazardID string) (*AuditLocat
 		return nil, err
 	}
 
-	client, err := mongo.Connect(options.Client().
-		ApplyURI(s.mongoURI).
-		SetHosts(hosts).
-		SetReplicaSet(replicaSet).
-		SetDirect(false).
-		SetServerSelectionTimeout(serverSelectionTimeout))
+	client, err := s.connectShard(replicaSet, hosts)
 	if err != nil {
 		return nil, fmt.Errorf("connect to owner shard %s: %w", shard, err)
 	}
 	defer client.Disconnect(context.WithoutCancel(ctx)) //nolint:errcheck -- best-effort audit connection cleanup
 
-	var status struct {
-		Members []struct {
-			Name     string  `bson:"name"`
-			StateStr string  `bson:"stateStr"`
-			Health   float64 `bson:"health"`
-		} `bson:"members"`
-	}
-	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "replSetGetStatus", Value: 1}}).Decode(&status); err != nil {
+	members, err := replicaStatus(ctx, client)
+	if err != nil {
 		return nil, fmt.Errorf("replica status for %s: %w", shard, err)
 	}
 
 	result := &AuditLocationResult{HazardID: hazardID, Shard: shard, Replicas: []AuditReplica{}}
-	for _, member := range status.Members {
+	for _, member := range members {
 		if member.Health != 1 {
 			result.Partial = true
 			continue
@@ -119,6 +122,19 @@ func (s *Store) ownerShard(ctx context.Context, hazardID string) (string, error)
 }
 
 func (s *Store) shardConnection(ctx context.Context, shardID string) (string, []string, error) {
+	shards, err := s.listShards(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, shard := range shards {
+		if shard.ID == shardID {
+			return shard.ReplicaSet, shard.Hosts, nil
+		}
+	}
+	return "", nil, fmt.Errorf("owner shard %s not returned by listShards", shardID)
+}
+
+func (s *Store) listShards(ctx context.Context) ([]shardInfo, error) {
 	var response struct {
 		Shards []struct {
 			ID   string `bson:"_id"`
@@ -126,19 +142,38 @@ func (s *Store) shardConnection(ctx context.Context, shardID string) (string, []
 		} `bson:"shards"`
 	}
 	if err := s.client.Database("admin").RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&response); err != nil {
-		return "", nil, fmt.Errorf("list shards: %w", err)
+		return nil, fmt.Errorf("list shards: %w", err)
 	}
+	result := make([]shardInfo, 0, len(response.Shards))
 	for _, shard := range response.Shards {
-		if shard.ID != shardID {
-			continue
-		}
 		set, hosts, err := parseShardHost(shard.Host)
 		if err != nil {
-			return "", nil, fmt.Errorf("parse owner shard %s: %w", shardID, err)
+			return nil, fmt.Errorf("parse shard %s: %w", shard.ID, err)
 		}
-		return set, hosts, nil
+		result = append(result, shardInfo{ID: shard.ID, ReplicaSet: set, Hosts: hosts})
 	}
-	return "", nil, fmt.Errorf("owner shard %s not returned by listShards", shardID)
+	return result, nil
+}
+
+func (s *Store) connectShard(replicaSet string, hosts []string) (*mongo.Client, error) {
+	return mongo.Connect(options.Client().
+		ApplyURI(s.mongoURI).
+		SetHosts(hosts).
+		SetReplicaSet(replicaSet).
+		SetDirect(false).
+		SetReadConcern(readconcern.Majority()).
+		SetWriteConcern(writeconcern.Majority()).
+		SetServerSelectionTimeout(serverSelectionTimeout))
+}
+
+func replicaStatus(ctx context.Context, client *mongo.Client) ([]replicaMemberStatus, error) {
+	var status struct {
+		Members []replicaMemberStatus `bson:"members"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "replSetGetStatus", Value: 1}}).Decode(&status); err != nil {
+		return nil, err
+	}
+	return status.Members, nil
 }
 
 func collectShardNames(value any, names map[string]struct{}) {

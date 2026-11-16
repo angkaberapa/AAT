@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,15 +17,23 @@ import (
 )
 
 type fakeReader struct {
-	lastFilter store.Filter
-	next       *store.LatestCursor
+	lastFilter  store.Filter
+	next        *store.LatestCursor
+	partial     bool
+	unavailable []string
+	err         error
 }
 
 func (r *fakeReader) ListPage(_ context.Context, f store.Filter) (store.Page, error) {
 	r.lastFilter = f
+	if r.err != nil {
+		return store.Page{}, r.err
+	}
 	return store.Page{
-		Items: []domain.HazardEvent{{HazardID: "HZ-1", Source: domain.SourcePVMBG}},
-		Next:  r.next,
+		Items:            []domain.HazardEvent{{HazardID: "HZ-1", Source: domain.SourcePVMBG}},
+		Next:             r.next,
+		Partial:          r.partial,
+		UnavailableUnits: r.unavailable,
 	}, nil
 }
 
@@ -90,6 +99,26 @@ func TestLatestPaginationRejectsInvalidCombinations(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d, want 400", target, rec.Code)
 		}
+	}
+}
+
+func TestHazardsExposePartialStorageAndUse503WhenNothingIsReadable(t *testing.T) {
+	t.Parallel()
+	partialReader := &fakeReader{partial: true, unavailable: []string{"shard-1"}}
+	_, body := get(t, newTestMux(partialReader), "/hazards?sort=latest&limit=50")
+	meta, ok := body["meta"].(map[string]any)
+	if !ok || meta["partial"] != true {
+		t.Fatalf("meta = %#v", body["meta"])
+	}
+	units, ok := meta["unavailable_units"].([]any)
+	if !ok || len(units) != 1 || units[0] != "shard-1" {
+		t.Fatalf("unavailable_units = %#v", meta["unavailable_units"])
+	}
+
+	unavailableReader := &fakeReader{err: errors.New("no shard is reachable")}
+	recorder, _ := get(t, newTestMux(unavailableReader), "/hazards?sort=latest&limit=50")
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
 	}
 }
 

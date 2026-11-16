@@ -84,6 +84,8 @@ data:
   KAFKA_HAZARD_TOPIC: hazard-events
   KAFKA_GROUP_ID: dashboard-updater
   PROCESSING_DELAY_MS: "0"
+  AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+  ANALYTICS_TIMEOUT_MS: "10000"
 ---
 apiVersion: v1
 kind: ConfigMap

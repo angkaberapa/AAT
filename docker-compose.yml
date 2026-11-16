@@ -115,12 +115,16 @@ services:
       KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
       KAFKA_GROUP_ID: dashboard-updater
       PROCESSING_DELAY_MS: ${DASHBOARD_PROCESSING_DELAY_MS:-0}
+      AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+      AUDIT_TOKEN: ${AUDIT_TOKEN:?set AUDIT_TOKEN in .env}
+      ANALYTICS_TIMEOUT_MS: ${ANALYTICS_TIMEOUT_MS:-10000}
     volumes:
       - dashboard-data:/data
     ports:
       - "${DASHBOARD_PORT:-8091}:8000"
     depends_on:
       kafka: { condition: service_healthy }
+      bnpb-aggregator: { condition: service_healthy }
     networks: [backend]
 
   bnpb-consumer-notifier:

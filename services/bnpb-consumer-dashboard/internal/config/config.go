@@ -17,6 +17,9 @@ type Config struct {
 	KafkaHazardTopic      string
 	// Each consumer has its own group so every one of them receives every event.
 	KafkaGroupID string
+	AggregatorBaseURL string
+	AuditToken        string
+	AnalyticsTimeout  time.Duration
 
 	// State (latest version per hazard) is persisted here, on a volume owned by this
 	// consumer, so restarts keep the dashboard and redeliveries stay idempotent.
@@ -35,7 +38,10 @@ func Load() (Config, error) {
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),
 		KafkaGroupID:          e.String("KAFKA_GROUP_ID", "dashboard-updater"),
+		AggregatorBaseURL:     e.String("AGGREGATOR_BASE_URL", "http://bnpb-aggregator:8000"),
+		AuditToken:            e.String("AUDIT_TOKEN", ""),
 	}
+	c.AnalyticsTimeout = e.Millis("ANALYTICS_TIMEOUT_MS", 10000*time.Millisecond)
 	c.StateFile = e.String("STATE_FILE", "/data/state.json")
 	delayMs := e.Int("PROCESSING_DELAY_MS", 0)
 	e.Check(delayMs >= 0, "PROCESSING_DELAY_MS must not be negative")

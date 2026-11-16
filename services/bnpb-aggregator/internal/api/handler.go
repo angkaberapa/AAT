@@ -60,12 +60,18 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 		page, err := reader.ListPage(r.Context(), filter)
 		if err != nil {
 			logger.ErrorContext(r.Context(), "list hazard events failed", "error", err.Error())
-			writeError(w, http.StatusInternalServerError, "failed to read hazard events")
+			writeError(w, http.StatusServiceUnavailable, "hazard storage is temporarily unavailable")
 			return
 		}
 
 		//data dari store tetap dilayani walau sumbernya lagi mati; meta.sources ngasih tau seberapa basi datanya.
 		meta := freshnessMeta(statuses, relevantSources(filter, statuses))
+		meta["partial"] = page.Partial
+		if page.UnavailableUnits == nil {
+			meta["unavailable_units"] = []string{}
+		} else {
+			meta["unavailable_units"] = page.UnavailableUnits
+		}
 		w.Header().Set(HeaderDataStale, strconv.FormatBool(meta["stale"].(bool)))
 		response := map[string]any{"data": page.Items, "meta": meta}
 		if filter.Order == store.OrderLatest {
@@ -83,7 +89,7 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 		event, err := reader.Get(r.Context(), r.PathValue("id"))
 		if err != nil {
 			logger.ErrorContext(r.Context(), "get hazard event failed", "error", err.Error())
-			writeError(w, http.StatusInternalServerError, "failed to read hazard event")
+			writeError(w, http.StatusServiceUnavailable, "hazard storage is temporarily unavailable")
 			return
 		}
 		if event == nil {
