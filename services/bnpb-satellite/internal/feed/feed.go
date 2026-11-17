@@ -1,4 +1,3 @@
-// Package feed turns Feed Satelit SSE frames into domain detections.
 package feed
 
 import (
@@ -24,30 +23,34 @@ const (
 	KindHeartbeat
 )
 
-// Message is one parsed SSE frame. Offset is the feed position to checkpoint
-// after the frame has been applied.
 type Message struct {
-	Kind      kind
-	Type      string
-	Offset    string
-	Detection domain.Detection
-	Key       string
+	Kind       kind
+	Type       string
+	Offset     string
+	Detection  domain.Detection
+	Key        string
+	Confidence *string
+	FRP        *float64
 }
 
 type rawDetection struct {
-	Offset       flexString `json:"offset"`
-	DetectionKey string     `json:"detection_key"`
-	Satellite    string     `json:"satellite"`
-	AcqDate      string     `json:"acq_date"`
-	AcqTime      flexString `json:"acq_time"`
-	Latitude     flexString `json:"latitude"`
-	Longitude    flexString `json:"longitude"`
-	Confidence   string     `json:"confidence"`
-	FRP          *flexFloat `json:"frp"`
+	Offset       flexString    `json:"offset"`
+	DetectionKey string        `json:"detection_key"`
+	Key          string        `json:"key"`
+	Detection    *rawDetection `json:"detection"`
+	Changes      *struct {
+		Confidence *string    `json:"confidence"`
+		FRP        *flexFloat `json:"frp"`
+	} `json:"changes"`
+	Satellite  string     `json:"satellite"`
+	AcqDate    string     `json:"acq_date"`
+	AcqTime    flexString `json:"acq_time"`
+	Latitude   flexString `json:"latitude"`
+	Longitude  flexString `json:"longitude"`
+	Confidence string     `json:"confidence"`
+	FRP        *flexFloat `json:"frp"`
 }
 
-// Parse decodes one SSE frame. An empty event id is filled from the JSON
-// offset field. Unknown types are rejected so the processor can count them.
 func Parse(eventType, id string, data []byte) (Message, error) {
 	switch eventType {
 	case "detection", "update", "retract", "heartbeat":
@@ -61,31 +64,48 @@ func Parse(eventType, id string, data []byte) (Message, error) {
 			return Message{Offset: strings.TrimSpace(id)}, fmt.Errorf("decode %s: %w", eventType, err)
 		}
 	}
-	offset := strings.TrimSpace(id)
+	offset := strings.TrimSpace(string(raw.Offset))
 	if offset == "" {
-		offset = strings.TrimSpace(string(raw.Offset))
+		offset = strings.TrimSpace(id)
 	}
-
 	message := Message{Type: eventType, Offset: offset}
+
 	switch eventType {
 	case "heartbeat":
 		message.Kind = KindHeartbeat
 		return message, nil
 	case "retract":
-		key := strings.TrimSpace(raw.DetectionKey)
+		key := firstNonEmpty(raw.Key, raw.DetectionKey)
 		if key == "" {
 			built, err := detectionKey(raw)
 			if err != nil {
-				return Message{}, fmt.Errorf("retract: %w", err)
+				return message, fmt.Errorf("retract: %w", err)
 			}
 			key = built
 		}
 		message.Kind = KindRetract
 		message.Key = key
 		return message, nil
+	case "update":
+		if raw.Key != "" && raw.Detection == nil {
+			message.Kind = KindUpdate
+			message.Key = raw.Key
+			if raw.Changes != nil {
+				message.Confidence = raw.Changes.Confidence
+				if raw.Changes.FRP != nil {
+					value := float64(*raw.Changes.FRP)
+					message.FRP = &value
+				}
+			}
+			return message, nil
+		}
 	}
 
-	detection, err := toDetection(raw, data)
+	effective := raw
+	if raw.Detection != nil {
+		effective = *raw.Detection
+	}
+	detection, err := toDetection(effective, data)
 	if err != nil {
 		message.Kind = KindDetection
 		return message, err
@@ -103,8 +123,7 @@ func toDetection(raw rawDetection, data []byte) (domain.Detection, error) {
 	if err != nil {
 		return domain.Detection{}, err
 	}
-	if strings.EqualFold(strings.TrimSpace(raw.Confidence), "low") ||
-		strings.EqualFold(strings.TrimSpace(raw.Confidence), "l") {
+	if IsLowConfidence(raw.Confidence) {
 		return domain.Detection{Key: key}, ErrLowConfidence
 	}
 	observedAt, err := observedAt(raw.AcqDate, string(raw.AcqTime))
@@ -130,6 +149,20 @@ func toDetection(raw rawDetection, data []byte) (domain.Detection, error) {
 	return detection, nil
 }
 
+func IsLowConfidence(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "low") ||
+		strings.EqualFold(strings.TrimSpace(value), "l")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func detectionKey(raw rawDetection) (string, error) {
 	parts := []string{
 		strings.TrimSpace(raw.Satellite),
@@ -146,8 +179,6 @@ func detectionKey(raw rawDetection) (string, error) {
 	return strings.Join(parts, "|"), nil
 }
 
-// observedAt combines acq_date and acq_time in UTC. acq_time is accepted as
-// "243", "0243", "02:43", or "02:43:00" because the feed is not consistent.
 func observedAt(date, clock string) (time.Time, error) {
 	date = strings.TrimSpace(date)
 	clock = strings.TrimSpace(clock)
@@ -173,13 +204,13 @@ func observedAt(date, clock string) (time.Time, error) {
 			}
 		}
 	} else {
-		digits := strings.TrimLeft(clock, "+")
+		digits := clock
 		for _, r := range digits {
 			if r < '0' || r > '9' {
 				return time.Time{}, fmt.Errorf("invalid acq_time %q", clock)
 			}
 		}
-		if len(digits) < 3 || len(digits) > 6 {
+		if len(digits) < 1 || len(digits) > 6 {
 			return time.Time{}, fmt.Errorf("invalid acq_time %q", clock)
 		}
 		for len(digits) < 4 {

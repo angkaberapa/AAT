@@ -69,7 +69,38 @@ func TestParseHeartbeatTakesOffset(t *testing.T) {
 	}
 }
 
-func TestParseRejectsUnknownType(t *testing.T) {
+func TestParseRealNestedDetection(t *testing.T) {
+	data := []byte(`{"offset":2011,"detection":{"version":"2.0NRT","scan":0.38,"acq_date":"2026-11-14","acq_time":324,"confidence":"h","frp":67.91,"latitude":-3.32633,"longitude":119.33397,"satellite":"N20"}}`)
+	message, err := Parse("detection", "2011", data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if message.Detection.Key != "N20|2026-11-14|324|-3.32633|119.33397" {
+		t.Fatalf("key = %q", message.Detection.Key)
+	}
+	if message.Detection.FRP == nil || *message.Detection.FRP != 67.91 {
+		t.Fatalf("frp = %v", message.Detection.FRP)
+	}
+}
+
+func TestParseRealUpdateAndRetract(t *testing.T) {
+	update, err := Parse("update", "2018", []byte(`{"offset":2018,"key":"N|2026-11-14|240|-8.06482|109.04909","changes":{"bright_ti5":271.64,"confidence":"l"}}`))
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if update.Kind != KindUpdate || update.Key == "" || update.Confidence == nil || *update.Confidence != "l" {
+		t.Fatalf("update = %+v", update)
+	}
+	retract, err := Parse("retract", "2012", []byte(`{"offset":2012,"reason":"false_positive","key":"N20|2026-11-14|318|-8.06722|109.04917"}`))
+	if err != nil {
+		t.Fatalf("retract: %v", err)
+	}
+	if retract.Key != "N20|2026-11-14|318|-8.06722|109.04917" {
+		t.Fatalf("retract key = %q", retract.Key)
+	}
+}
+
+func TestParseUnknownType(t *testing.T) {
 	if _, err := Parse("snapshot", "1", []byte(`{}`)); err == nil {
 		t.Fatal("expected an error")
 	}

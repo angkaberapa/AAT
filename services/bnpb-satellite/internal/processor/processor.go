@@ -153,7 +153,12 @@ func (p *Processor) handle(ctx context.Context, event sse.Event) error {
 		p.metrics.IncEvent("heartbeat", "ok")
 		return p.commitOffset(ctx, message.Offset)
 	case feed.KindDetection, feed.KindUpdate:
-		if err := p.applyDetection(ctx, message); err != nil {
+		if message.Kind == feed.KindUpdate && message.Detection.Key == "" {
+			if err := p.applyUpdate(ctx, message); err != nil {
+				p.metrics.IncEvent(message.Type, "error")
+				return err
+			}
+		} else if err := p.applyDetection(ctx, message); err != nil {
 			p.metrics.IncEvent(message.Type, "error")
 			return err
 		}
@@ -215,6 +220,32 @@ func (p *Processor) applyDetection(ctx context.Context, message feed.Message) er
 		"detection_key", message.Detection.Key, "offset", message.Offset,
 		"fires", len(current.Fires), "singles", len(current.Singles))
 	return nil
+}
+
+func (p *Processor) applyUpdate(ctx context.Context, message feed.Message) error {
+	if message.Key == "" {
+		return fmt.Errorf("update has no key")
+	}
+	existing, err := p.store.Detection(ctx, message.Key)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return p.commitOffset(ctx, message.Offset)
+	}
+	if message.Confidence != nil && feed.IsLowConfidence(*message.Confidence) {
+		return p.applyRetract(ctx, feed.Message{Kind: feed.KindRetract, Offset: message.Offset, Key: message.Key})
+	}
+	if message.Confidence != nil {
+		existing.Confidence = *message.Confidence
+	}
+	if message.FRP != nil {
+		existing.FRP = message.FRP
+	}
+	existing.Active = true
+	message.Detection = *existing
+	message.Kind = feed.KindDetection
+	return p.applyDetection(ctx, message)
 }
 
 func (p *Processor) applyRetract(ctx context.Context, message feed.Message) error {
