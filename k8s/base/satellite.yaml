@@ -50,7 +50,7 @@ spec:
             - name: SATELLITE_TOKEN
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: SATELLITE_TOKEN } }
             - name: SATELLITE_INGEST_TOKEN
-              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: SATELLITE_INGEST_TOKEN } }
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: COASTAL_INGEST_TOKEN } }
           volumeMounts: [{ name: data, mountPath: /data }]
           readinessProbe:
             httpGet: { path: /health, port: http }
