@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	endpoint := flag.String("url", "http://localhost:18000/internal/p1/catalog", "Aggregator catalogue endpoint")
+	endpoint := flag.String("url", "http://localhost:18000/internal/catalog/seismic-events", "Aggregator seismic catalogue endpoint")
 	token := flag.String("token", os.Getenv("AUDIT_TOKEN"), "audit token (defaults to AUDIT_TOKEN)")
 	count := flag.Int("count", 10000, "number of earthquakes")
 	workers := flag.Int("workers", 8, "concurrent batch workers")

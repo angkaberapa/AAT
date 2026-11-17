@@ -44,7 +44,7 @@ func catalogMux(mapper seismicMapper, importer importer) *http.ServeMux {
 }
 
 func catalogRequest(mux *http.ServeMux, token, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/internal/p1/catalog", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/catalog/seismic-events", strings.NewReader(body))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

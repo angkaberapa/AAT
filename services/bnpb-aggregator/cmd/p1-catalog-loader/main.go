@@ -20,7 +20,7 @@ import (
 
 func main() {
 	file := flag.String("file", "", "historical catalogue (.json or .csv)")
-	endpoint := flag.String("url", "http://localhost:18000/internal/p1/catalog", "Aggregator catalogue endpoint")
+	endpoint := flag.String("url", "http://localhost:18000/internal/catalog/seismic-events", "Aggregator seismic catalogue endpoint")
 	token := flag.String("token", os.Getenv("AUDIT_TOKEN"), "audit token (defaults to AUDIT_TOKEN)")
 	batchSize := flag.Int("batch-size", 250, "events per transaction (1-500)")
 	timeout := flag.Duration("timeout", 60*time.Second, "HTTP timeout per batch")
