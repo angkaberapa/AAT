@@ -23,7 +23,7 @@ func TestIngestHazardAgainstMongo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close(context.Background())                                         //nolint:errcheck -- test cleanup
+	defer db.Close(context.Background())                                      //nolint:errcheck -- test cleanup
 	defer db.client.Database("ingest_integration").Drop(context.Background()) //nolint:errcheck -- test cleanup
 
 	at := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
