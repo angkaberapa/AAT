@@ -14,7 +14,12 @@ import (
 // compared with detections, and a full recompute is easier to reason about than
 // incremental component splitting.
 func Reconcile(active []domain.Detection, existingIDs []string) ([]Fire, []string) {
-	current := Cluster(active)
+	return ReconcileResult(Cluster(active), existingIDs)
+}
+
+// ReconcileResult is Reconcile for callers that already clustered the active
+// set and also need the single-detection count.
+func ReconcileResult(current Result, existingIDs []string) ([]Fire, []string) {
 	currentIDs := make(map[string]struct{}, len(current.Fires))
 	for _, fire := range current.Fires {
 		currentIDs[fire.ID] = struct{}{}

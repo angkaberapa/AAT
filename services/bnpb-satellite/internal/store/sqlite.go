@@ -183,6 +183,34 @@ func InsertDetectionTx(ctx context.Context, tx *sql.Tx, detection domain.Detecti
 	return rows > 0, nil
 }
 
+// UpsertDetectionTx inserts a detection or refreshes the mutable fields of an
+// existing one. update events may change confidence or FRP without changing the
+// detection key, and a retracted key may reappear.
+func UpsertDetectionTx(ctx context.Context, tx *sql.Tx, detection domain.Detection) (bool, error) {
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO detections(
+			detection_key, satellite, acq_date, acq_time, latitude, longitude,
+			confidence, frp, observed_at, active, raw_json
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(detection_key) DO UPDATE SET
+			confidence = excluded.confidence,
+			frp = excluded.frp,
+			active = 1,
+			raw_json = excluded.raw_json`,
+		detection.Key, detection.Satellite, detection.AcqDate, detection.AcqTime,
+		detection.Latitude, detection.Longitude, detection.Confidence,
+		nullableFloat(detection.FRP), formatTime(detection.ObservedAt),
+		boolInt(detection.Active), detection.RawJSON)
+	if err != nil {
+		return false, fmt.Errorf("upsert detection: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("detection rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
 func DeactivateDetectionTx(ctx context.Context, tx *sql.Tx, key string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE detections SET active = 0 WHERE detection_key = ?`, key)
 	if err != nil {
@@ -255,7 +283,10 @@ func UpsertFireTx(ctx context.Context, tx *sql.Tx, fire domain.Fire) (int, error
 		) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fire_id) DO UPDATE SET
 			event_json = excluded.event_json,
-			version = fires.version + 1,
+			version = CASE
+				WHEN fires.event_json = excluded.event_json THEN fires.version
+				ELSE fires.version + 1
+			END,
 			first_detection_key = excluded.first_detection_key,
 			last_detection_at = excluded.last_detection_at,
 			detection_count = excluded.detection_count,
@@ -275,7 +306,10 @@ func UpsertFireTx(ctx context.Context, tx *sql.Tx, fire domain.Fire) (int, error
 func DeleteFireTx(ctx context.Context, tx *sql.Tx, fireID string) (int, error) {
 	var version int
 	err := tx.QueryRowContext(ctx, `
-		UPDATE fires SET active = 0, version = version + 1, updated_at = ?
+		UPDATE fires SET
+			active = 0,
+			version = CASE WHEN active = 1 THEN version + 1 ELSE version END,
+			updated_at = ?
 		WHERE fire_id = ? RETURNING version`, formatTime(time.Now()), fireID).Scan(&version)
 	if err == sql.ErrNoRows {
 		return 0, fmt.Errorf("fire %s not found", fireID)
@@ -368,6 +402,33 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, message string, 
 		return fmt.Errorf("mark outbox failed: %w", err)
 	}
 	return nil
+}
+
+// ParkOutbox keeps a rejected command locally. It is used when retrying cannot
+// succeed without a system change, so the processor can move past the offset.
+func (s *Store) ParkOutbox(ctx context.Context, id int64, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE outbox SET parked_at = ?, park_reason = ?, last_error = ? WHERE id = ?`,
+		formatTime(time.Now()), reason, reason, id)
+	if err != nil {
+		return fmt.Errorf("park outbox: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LatestObservedAt(ctx context.Context) (time.Time, error) {
+	var value sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(observed_at) FROM detections WHERE active = 1`).Scan(&value); err != nil {
+		return time.Time{}, fmt.Errorf("latest detection: %w", err)
+	}
+	if !value.Valid || value.String == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := parseTime(value.String)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse latest detection: %w", err)
+	}
+	return parsed, nil
 }
 
 func (s *Store) HasUnsentOutbox(ctx context.Context) (bool, error) {
