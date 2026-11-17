@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/angkaberapa/AAT/services/bnpb-satellite/internal/core"
@@ -49,6 +50,8 @@ type Processor struct {
 	now     func() time.Time
 
 	latest       time.Time
+	mu           sync.Mutex
+	flushMu      sync.Mutex
 	pending      []feed.Message
 	lastFlush    time.Time
 	batchSize    int
@@ -104,6 +107,7 @@ func (p *Processor) Run(ctx context.Context) {
 	}
 
 	go p.flushLoop(ctx)
+	go p.batchLoop(ctx)
 
 	attempt := 0
 	for {
@@ -155,8 +159,12 @@ func (p *Processor) handle(ctx context.Context, event sse.Event) error {
 				"type", event.Type, "offset", message.Offset, "error", err.Error())
 		}
 	}
+	p.mu.Lock()
 	p.pending = append(p.pending, message)
-	if len(p.pending) >= p.batchSize || p.now().Sub(p.lastFlush) >= p.batchEvery {
+	size := len(p.pending)
+	elapsed := p.now().Sub(p.lastFlush)
+	p.mu.Unlock()
+	if size >= p.batchSize || elapsed >= p.batchEvery {
 		return p.flushBatch(ctx)
 	}
 	return nil
@@ -165,13 +173,19 @@ func (p *Processor) handle(ctx context.Context, event sse.Event) error {
 // flushBatch applies every buffered frame in one transaction. Clustering runs
 // once per batch, so a 60x feed no longer pays a full recompute per event.
 func (p *Processor) flushBatch(ctx context.Context) error {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	p.mu.Lock()
 	if len(p.pending) == 0 {
+		p.mu.Unlock()
 		return nil
 	}
-	started := p.now()
 	batch := p.pending
 	p.pending = nil
-	p.lastFlush = started
+	p.lastFlush = p.now()
+	p.mu.Unlock()
+
+	started := p.now()
 
 	active, err := p.store.ActiveDetections(ctx)
 	if err != nil {
@@ -477,6 +491,21 @@ func (p *Processor) writeProjection(ctx context.Context, tx *sql.Tx, fires []wil
 		p.metrics.IncFireChange("delete")
 	}
 	return nil
+}
+
+func (p *Processor) batchLoop(ctx context.Context) {
+	ticker := time.NewTicker(p.batchEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := p.flushBatch(ctx); err != nil {
+				p.logger.ErrorContext(ctx, "flush batch failed", "error", err.Error())
+			}
+		}
+	}
 }
 
 func (p *Processor) flushLoop(ctx context.Context) {
