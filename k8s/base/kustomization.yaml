@@ -8,6 +8,7 @@ resources:
   - kafka.yaml
   - mocks.yaml
   - coastal.yaml
+  - satellite.yaml
   - aggregator.yaml
   - api.yaml
   - consumers.yaml

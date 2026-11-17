@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-satellite-config
+data:
+  LOG_LEVEL: INFO
+  SATELLITE_BASE_URL: https://satellite.naufarrel.dev
+  SATELLITE_RECONNECT_MIN_SECONDS: "1"
+  SATELLITE_RECONNECT_MAX_SECONDS: "30"
+  SATELLITE_ALLOWED_LATENESS_SECONDS: "21600"
+  AGGREGATOR_BASE_URL: http://bnpb-aggregator:8000
+  AGGREGATOR_TIMEOUT_MS: "5000"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bnpb-satellite-data
+  labels: { app: bnpb-satellite, role: consumer }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 100Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-satellite
+  labels: { app: bnpb-satellite, role: consumer }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bnpb-satellite }
+  template:
+    metadata:
+      labels: { app: bnpb-satellite, role: consumer }
+    spec:
+      enableServiceLinks: false
+      securityContext: { fsGroup: 65532 }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bnpb-satellite
+          image: aat/bnpb-satellite:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-satellite-config } }]
+          env:
+            - name: SATELLITE_DB_PATH
+              value: /data/satellite.db
+            - name: SATELLITE_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: SATELLITE_TOKEN } }
+            - name: SATELLITE_INGEST_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: SATELLITE_INGEST_TOKEN } }
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bnpb-satellite-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-satellite
+  labels: { app: bnpb-satellite, role: consumer }
+spec:
+  selector: { app: bnpb-satellite }
+  ports: [{ name: http, port: 8000, targetPort: http }]
