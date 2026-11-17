@@ -40,7 +40,7 @@ type importResponse struct {
 }
 
 func Register(mux *http.ServeMux, logger *slog.Logger, mapper seismicMapper, destination importer, token string) {
-	mux.HandleFunc("POST /internal/p1/catalog", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /internal/catalog/seismic-events", func(w http.ResponseWriter, r *http.Request) {
 		if !validToken(r.Header.Get("Authorization"), token) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "unauthorized", "token tidak valid")
