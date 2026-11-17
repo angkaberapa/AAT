@@ -17,6 +17,7 @@ import (
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/fieldreports"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/ingest"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/ingestapi"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/leader"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/mapping"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/publisher"
@@ -77,6 +78,7 @@ func main() {
 	audit.Register(mux, logger, st, location, cfg.AuditToken)
 	catalog.Register(mux, logger, mapper, st, cfg.AuditToken)
 	quarantine.RegisterUnprocessedIngest(mux, logger, st, cfg.CoastalIngestToken)
+	ingestapi.RegisterHazards(mux, logger, st, cfg.CoastalIngestToken, cfg.SatelliteIngestToken)
 	fieldreports.Register(mux, logger, st, cfg.FieldReportIngestToken, cfg.AuditToken)
 	quarantine.RegisterReplay(mux, logger, st, mapper, cfg.AuditToken, cfg.InstanceID+"-manual-replay", cfg.PVMBGCompatibilityVersion)
 	fieldWorkerDone := make(chan struct{})
