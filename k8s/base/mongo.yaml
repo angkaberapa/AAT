@@ -89,8 +89,9 @@ spec:
   selector: { app: mongo }
   ports: [{ name: mongo, port: 27017, targetPort: mongo }]
 ---
-# "Storage dimiliki tepat satu service" ditegakkan platform (Ketentuan Implementasi no. 8):
-# hanya pod role=aggregator yang boleh membuka koneksi ke pod role=store.
+# "Storage dimiliki tepat satu service" ditegakkan platform (Ketentuan Implementasi no. 8).
+# Aggregator adalah pemilik aplikasi; role=store dibolehkan untuk replikasi internal Mongo,
+# dan bootstrap/router hanya memperoleh akses melalui label yang sempit.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -103,3 +104,9 @@ spec:
     - from:
         - podSelector:
             matchLabels: { role: aggregator }
+        - podSelector:
+            matchLabels: { role: store }
+        - podSelector:
+            matchLabels: { app: mongo-router }
+        - podSelector:
+            matchLabels: { app: mongo-bootstrap }

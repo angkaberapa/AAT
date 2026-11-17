@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	ScopeHazardsSummary = "hazards:summary"
-	ScopeHazardsRead    = "hazards:read"
+	ScopeHazardsSummary    = "hazards:summary"
+	ScopeHazardsRead       = "hazards:read"
+	ScopeFieldReportsWrite = "field-reports:write"
 )
 
 var (

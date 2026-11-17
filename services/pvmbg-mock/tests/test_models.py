@@ -116,7 +116,7 @@ def test_reported_at_is_normalized_to_utc() -> None:
     assert report.model_dump(mode="json")["reported_at"] == "2026-09-25T10:00:00Z"
 
 
-@pytest.mark.parametrize("version", [0, 3, "2"])
+@pytest.mark.parametrize("version", [0, 6, "2"])
 def test_invalid_schema_version_is_rejected(version: object) -> None:
     with pytest.raises(ValidationError):
         SchemaVersionRequest.model_validate({"version": version})

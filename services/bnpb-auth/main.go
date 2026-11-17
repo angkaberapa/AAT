@@ -34,7 +34,7 @@ func main() {
 		RefreshTTL:     cfg.RefreshTokenTTL,
 		Clients: []token.Client{
 			{ID: cfg.ClientMediaID, Secret: cfg.ClientMediaSecret, Scope: token.ScopeHazardsSummary, Role: "media"},
-			{ID: cfg.ClientFieldID, Secret: cfg.ClientFieldSecret, Scope: token.ScopeHazardsRead, Role: "field"},
+			{ID: cfg.ClientFieldID, Secret: cfg.ClientFieldSecret, Scope: token.ScopeHazardsRead + " " + token.ScopeFieldReportsWrite, Role: "field"},
 			{ID: cfg.ClientOpsID, Secret: cfg.ClientOpsSecret, Scope: token.ScopeHazardsRead, Role: "ops"},
 		},
 	})

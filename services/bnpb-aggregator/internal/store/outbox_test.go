@@ -1,8 +1,11 @@
 package store
 
 import (
+	"reflect"
 	"testing"
 	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
@@ -62,5 +65,15 @@ func TestContentHashDetectsRealChanges(t *testing.T) {
 		if hash(t, e) == base {
 			t.Fatalf("%s change not detected", name)
 		}
+	}
+}
+
+func TestEventIdentityFilterUsesOnlyShardKey(t *testing.T) {
+	t.Parallel()
+
+	event := sampleEvent()
+	want := bson.D{{Key: "hazard_id", Value: event.HazardID}}
+	if got := eventIdentityFilter(event); !reflect.DeepEqual(got, want) {
+		t.Fatalf("eventIdentityFilter() = %#v, want %#v", got, want)
 	}
 }

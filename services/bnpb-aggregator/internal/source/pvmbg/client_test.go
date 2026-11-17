@@ -19,6 +19,15 @@ type fakeHTTPClient struct {
 	do func(*http.Request, string) (*http.Response, error)
 }
 
+type fakeFailureSink struct {
+	failures []ingest.RawFailure
+}
+
+func (sink *fakeFailureSink) StoreRawFailure(_ context.Context, failure ingest.RawFailure) error {
+	sink.failures = append(sink.failures, failure)
+	return nil
+}
+
 func (client fakeHTTPClient) Do(request *http.Request, target string) (*http.Response, error) {
 	return client.do(request, target)
 }
@@ -169,6 +178,8 @@ func TestFetchSkipsMalformedReportAndCommitsObservedTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	failures := &fakeFailureSink{}
+	client.SetFailureSink(failures)
 	since := time.Date(2026, time.October, 3, 8, 0, 0, 0, time.UTC)
 	events, err := client.Fetch(context.Background(), &since)
 	if err != nil {
@@ -176,6 +187,9 @@ func TestFetchSkipsMalformedReportAndCommitsObservedTimestamp(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].SourceRefID != "PVMBG-RPT-GOOD" {
 		t.Fatalf("events = %+v, want only valid report", events)
+	}
+	if len(failures.failures) != 1 || failures.failures[0].SourceRefID != "PVMBG-RPT-BAD" {
+		t.Fatalf("parked failures = %+v, want malformed report intact", failures.failures)
 	}
 	client.CommitFetch()
 
@@ -193,10 +207,34 @@ func TestFetchRejectsOversizedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
+	client.SetFailureSink(&fakeFailureSink{})
 
 	_, err = client.Fetch(context.Background(), nil)
 	var sourceError *ingest.SourceError
 	if !errors.As(err, &sourceError) || sourceError.Kind != ingest.ErrorInvalidResponse {
 		t.Fatalf("Fetch() error = %v, want invalid response size error", err)
+	}
+}
+
+func TestDecodeReportRequiresExplicitCompatibilityUpgrade(t *testing.T) {
+	base := `{"report_id":"PVMBG-RPT-1","volcano_id":"MERAPI","level":"Siaga","eruption_count_24h":"7","ash_column_height_m":1500,"reported_at":"2026-10-03T08:30:00Z"}`
+	if _, err := DecodeReport([]byte(base), 2); err == nil {
+		t.Fatal("schema v4 decoded before compatibility upgrade")
+	}
+	report, err := DecodeReport([]byte(base), 4)
+	if err != nil {
+		t.Fatalf("DecodeReport(v4 compatibility) error = %v", err)
+	}
+	if report.AlertLevel != "Siaga" || report.EruptionCount24H != 7 {
+		t.Fatalf("normalized report = %+v", report)
+	}
+
+	missing := `{"report_id":"PVMBG-RPT-2","volcano_id":"MERAPI","alert_level":"Waspada","ash_column_height_m":0,"reported_at":"2026-10-03T08:31:00Z"}`
+	if _, err := DecodeReport([]byte(missing), 4); err == nil {
+		t.Fatal("missing required field decoded before v5 compatibility")
+	}
+	report, err = DecodeReport([]byte(missing), 5)
+	if err != nil || report.EruptionCount24H != 0 {
+		t.Fatalf("DecodeReport(v5 compatibility) report=%+v err=%v", report, err)
 	}
 }

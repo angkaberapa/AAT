@@ -10,13 +10,17 @@ import (
 	"time"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/api"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/audit"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/catalog"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/fieldreports"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/ingest"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/leader"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/mapping"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/publisher"
+	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/quarantine"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/reference"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/bmkg"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/source/pvmbg"
@@ -48,22 +52,6 @@ func main() {
 		logger.Error("canonical store", "error", err.Error())
 		os.Exit(1)
 	}
-
-	//P2 M2: status kebaruan per sumber dibaca dari storage bersama, jadi leader & follower sama.
-	statuses := ingest.NewSharedStatus(func(ctx context.Context) ([]ingest.Record, error) {
-		recs, err := st.SourceStatuses(ctx)
-		return toIngestRecords(recs), err
-	}, polledSources, cfg.SourceStaleAfter, time.Second, logger)
-	api.Register(mux, logger, st, statuses, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
-
-	//P5: producer Kafka + relay outbox (relay hanya jalan di leader).
-	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)
-	if err != nil {
-		logger.Error("kafka producer", "error", err.Error())
-		os.Exit(1)
-	}
-	relay := publisher.NewRelay(st, producer, logger, cfg.OutboxRelayInterval, cfg.OutboxBatchSize)
-
 	volcanoes, err := reference.Volcanoes()
 	if err != nil {
 		logger.Error("volcano reference table", "error", err.Error())
@@ -74,6 +62,36 @@ func main() {
 		logger.Error("mapper", "error", err.Error())
 		os.Exit(1)
 	}
+
+	//P2 M2: status kebaruan per sumber dibaca dari storage bersama, jadi leader & follower sama.
+	statuses := ingest.NewSharedStatus(func(ctx context.Context) ([]ingest.Record, error) {
+		recs, err := st.SourceStatuses(ctx)
+		return toIngestRecords(recs), err
+	}, polledSources, cfg.SourceStaleAfter, time.Second, logger)
+	api.Register(mux, logger, st, statuses, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
+	location, err := audit.NewKubernetesLocator(st, cfg.PodNamespace)
+	if err != nil {
+		logger.Warn("audit node locator unavailable", "error", err.Error())
+		location = audit.NewUnavailableLocator(err)
+	}
+	audit.Register(mux, logger, st, location, cfg.AuditToken)
+	catalog.Register(mux, logger, mapper, st, cfg.AuditToken)
+	quarantine.RegisterUnprocessedIngest(mux, logger, st, cfg.CoastalIngestToken)
+	fieldreports.Register(mux, logger, st, cfg.FieldReportIngestToken, cfg.AuditToken)
+	quarantine.RegisterReplay(mux, logger, st, mapper, cfg.AuditToken, cfg.InstanceID+"-manual-replay", cfg.PVMBGCompatibilityVersion)
+	fieldWorkerDone := make(chan struct{})
+	go func() {
+		defer close(fieldWorkerDone)
+		fieldreports.RunWorker(ctx, logger, st, cfg.InstanceID, cfg.FieldReportWorkerInterval, cfg.FieldReportLeaseDuration, cfg.FieldReportProcessingDelay)
+	}()
+
+	//P5: producer Kafka + relay outbox (relay hanya jalan di leader).
+	producer, err := publisher.NewKafkaProducer(cfg.KafkaBootstrapServers, cfg.KafkaHazardTopic, logger)
+	if err != nil {
+		logger.Error("kafka producer", "error", err.Error())
+		os.Exit(1)
+	}
+	relay := publisher.NewRelay(st, producer, logger, cfg.OutboxRelayInterval, cfg.OutboxBatchSize)
 
 	httpClient := core.NewHTTPClient(logger, cfg.UpstreamTimeout)
 	// P2 M2 kriteria 2: log upstream bisa menunjukkan instance mana yang memanggil.
@@ -109,6 +127,7 @@ func main() {
 	//lease dilepas) sebelum producer dan store ditutup.
 	stop()
 	<-leaderDone
+	<-fieldWorkerDone
 	producer.Close()
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -214,6 +233,8 @@ func (t *termRunner) run(leadCtx context.Context) {
 		logger.ErrorContext(ctx, "pvmbg client", "error", err.Error())
 		return
 	}
+	pvmbgClient.SetFailureSink(quarantine.NewFailureSink(t.store))
+	pvmbgClient.SetCompatibilityVersion(t.cfg.PVMBGCompatibilityVersion)
 
 	relayDone := make(chan struct{})
 	go func() {

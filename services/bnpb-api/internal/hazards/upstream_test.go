@@ -127,7 +127,8 @@ func TestUpstreamFailuresMapToExplicitStatuses(t *testing.T) {
 
 func TestFreshnessMetaReachesMediaClient(t *testing.T) {
 	body := `{"data":[{"hazard_id":"HZ-1","source":"PVMBG","latitude":-7.5,"attributes":{}}],
-	          "meta":{"stale":true,"sources":{"PVMBG":{"status":"stale","stale_since":"2026-10-07T10:00:00Z"}}}}`
+	          "meta":{"stale":true,"sources":{"PVMBG":{"status":"stale","stale_since":"2026-10-07T10:00:00Z"}}},
+	          "next_cursor":"opaque-page-cursor"}`
 	rec := serveWith(t, stubClient{status: http.StatusOK, body: body}, "/hazards?hazard_type=VOLCANIC", security.ScopeHazardsSummary)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -141,6 +142,13 @@ func TestFreshnessMetaReachesMediaClient(t *testing.T) {
 	}
 	if payload.Meta["stale"] != true {
 		t.Fatalf("meta = %v", payload.Meta)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["next_cursor"] != "opaque-page-cursor" {
+		t.Fatalf("next_cursor = %v", envelope["next_cursor"])
 	}
 	if _, leaked := payload.Data[0]["latitude"]; leaked {
 		t.Fatal("raw field leaked to media")

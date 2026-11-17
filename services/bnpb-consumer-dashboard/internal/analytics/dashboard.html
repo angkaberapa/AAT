@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BNPB Hazard Analytics</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #0e1d2f;
+      --panel-2: #13263b;
+      --line: #29405a;
+      --text: #edf5ff;
+      --muted: #9fb1c6;
+      --accent: #62d4b2;
+      --danger: #ff8a80;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 85% -10%, #183854 0, var(--bg) 38%); color: var(--text); font: 15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; }
+    main { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 36px 0 64px; }
+    header { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); letter-spacing: -.04em; }
+    h2 { margin: 0 0 16px; font-size: 18px; }
+    p { margin: 5px 0 0; color: var(--muted); }
+    label { color: var(--muted); font-size: 13px; }
+    select, button { border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); color: var(--text); padding: 10px 12px; font: inherit; }
+    button { background: var(--accent); color: #062019; border: 0; cursor: pointer; font-weight: 700; }
+    .controls { display: flex; gap: 10px; align-items: end; }
+    .control { display: grid; gap: 5px; }
+    .status { display: none; padding: 12px 14px; border: 1px solid #70534f; border-radius: 10px; margin-bottom: 16px; background: #2d2022; color: #ffd6d2; }
+    .status.show { display: block; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+    .card, .panel { border: 1px solid var(--line); background: linear-gradient(145deg, rgba(19,38,59,.94), rgba(9,23,38,.94)); border-radius: 14px; box-shadow: 0 14px 36px rgba(0,0,0,.18); }
+    .card { padding: 18px; }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+    .card .value { margin-top: 8px; font-size: 28px; font-weight: 750; }
+    .panel { padding: 20px; min-width: 0; }
+    .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 14px; margin-bottom: 14px; }
+    #trend { width: 100%; min-height: 330px; display: block; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; }
+    .severity-row { margin: 12px 0; }
+    .severity-meta { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 5px; }
+    .bar { height: 9px; border-radius: 8px; background: #1c3148; overflow: hidden; }
+    .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 10px 8px; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    td:last-child, th:last-child { text-align: right; }
+    .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+    .loading { opacity: .55; pointer-events: none; }
+    @media (max-width: 780px) {
+      header { align-items: start; flex-direction: column; }
+      .cards, .grid { grid-template-columns: 1fr; }
+      .controls { width: 100%; }
+      .control { flex: 1; }
+      select, button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<main id="app">
+  <header>
+    <div>
+      <h1>Hazard Analytics</h1>
+      <p>Agregasi kanonis BNPB lintas seluruh shard penyimpanan.</p>
+    </div>
+    <div class="controls">
+      <div class="control">
+        <label for="range">Rentang waktu</label>
+        <select id="range">
+          <option value="all">Seluruh data</option>
+          <option value="24h">24 jam</option>
+          <option value="7d">7 hari</option>
+          <option value="30d">30 hari</option>
+          <option value="90d">90 hari</option>
+        </select>
+      </div>
+      <button id="refresh" type="button">Muat ulang</button>
+    </div>
+  </header>
+
+  <div id="status" class="status" role="alert"></div>
+  <section class="cards" aria-label="Ringkasan">
+    <article class="card"><div class="label">Total HazardEvent</div><div id="total" class="value">-</div></article>
+    <article class="card"><div class="label">Status data</div><div id="completeness" class="value">-</div></article>
+    <article class="card"><div class="label">Dihitung pada</div><div id="asof" class="value" style="font-size:18px">-</div></article>
+  </section>
+
+  <section class="grid">
+    <article class="panel">
+      <h2>Jumlah kejadian terhadap waktu</h2>
+      <svg id="trend" viewBox="0 0 900 330" role="img" aria-label="Grafik jumlah kejadian per jenis bahaya"></svg>
+      <div id="legend" class="legend"></div>
+    </article>
+    <article class="panel">
+      <h2>Kejadian per severity</h2>
+      <div id="severity"></div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <h2>Kejadian per wilayah</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Jumlah</th></tr></thead>
+      <tbody id="areas"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+  const colors = {SEISMIC:'#63b3ff', TSUNAMI:'#aa8cff', VOLCANIC:'#ff9068', WILDFIRE:'#ffd166', COASTAL:'#62d4b2'};
+  const app = document.getElementById('app');
+  const range = document.getElementById('range');
+  const statusBox = document.getElementById('status');
+  const svgNS = 'http://www.w3.org/2000/svg';
+
+  function queryForRange(value) {
+    const query = new URLSearchParams();
+    if (value === 'all') { query.set('bucket', 'day'); return query; }
+    const now = new Date();
+    const amounts = { '24h': 1, '7d': 7, '30d': 30, '90d': 90 };
+    const from = new Date(now.getTime() - amounts[value] * 86400000);
+    query.set('from', from.toISOString());
+    query.set('to', now.toISOString());
+    query.set('bucket', value === '24h' || value === '7d' ? 'hour' : 'day');
+    return query;
+  }
+
+  async function load() {
+    app.classList.add('loading');
+    statusBox.className = 'status';
+    try {
+      const response = await fetch('/analytics/data?' + queryForRange(range.value), {cache:'no-store'});
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error?.message || `HTTP ${response.status}`);
+      render(body);
+    } catch (error) {
+      statusBox.textContent = 'Dashboard tidak dapat memuat data: ' + error.message;
+      statusBox.className = 'status show';
+    } finally {
+      app.classList.remove('loading');
+    }
+  }
+
+  function render(data) {
+    document.getElementById('total').textContent = Number(data.total).toLocaleString('id-ID');
+    document.getElementById('completeness').textContent = data.partial ? 'Sebagian' : (data.degraded ? 'Lengkap*' : 'Lengkap');
+    document.getElementById('asof').textContent = new Date(data.as_of).toLocaleString('id-ID', {timeZone:'UTC'}) + ' UTC';
+    if (data.partial) {
+      const units = (data.unavailable_units || []).join(', ') || 'unit tidak diketahui';
+      statusBox.textContent = 'Angka belum lengkap. Unit tidak tersedia: ' + units;
+      statusBox.className = 'status show';
+    } else if (data.degraded) {
+      const units = (data.unavailable_units || []).join(', ') || 'replica tidak diketahui';
+      statusBox.textContent = 'Data masih lengkap, tetapi redundansi storage sedang berkurang: ' + units;
+      statusBox.className = 'status show';
+    }
+    renderTrend(data.time_series || []);
+    renderSeverity(data.by_severity || []);
+    renderAreas(data.by_area || []);
+  }
+
+  function svgElement(name, attributes = {}) {
+    const element = document.createElementNS(svgNS, name);
+    for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+    return element;
+  }
+
+  function renderTrend(rows) {
+    const svg = document.getElementById('trend');
+    const legend = document.getElementById('legend');
+    svg.replaceChildren(); legend.replaceChildren();
+    if (!rows.length) {
+      const text = svgElement('text', {x:450, y:165, fill:'#9fb1c6', 'text-anchor':'middle'});
+      text.textContent = 'Tidak ada kejadian pada rentang ini'; svg.append(text); return;
+    }
+    const margin = {left:52, right:18, top:16, bottom:42};
+    const width = 900 - margin.left - margin.right, height = 330 - margin.top - margin.bottom;
+    const buckets = [...new Set(rows.map(row => row.bucket))].sort();
+    const types = [...new Set(rows.map(row => row.hazard_type))].sort();
+    const values = new Map(rows.map(row => [`${row.bucket}|${row.hazard_type}`, Number(row.count)]));
+    const max = Math.max(1, ...rows.map(row => Number(row.count)));
+    for (let i = 0; i <= 4; i++) {
+      const y = margin.top + height * i / 4;
+      svg.append(svgElement('line', {x1:margin.left, x2:margin.left+width, y1:y, y2:y, stroke:'#29405a'}));
+      const label = svgElement('text', {x:margin.left-8, y:y+4, fill:'#9fb1c6', 'text-anchor':'end', 'font-size':'11'});
+      label.textContent = Math.round(max * (4-i) / 4); svg.append(label);
+    }
+    const x = index => margin.left + (buckets.length === 1 ? width/2 : width * index/(buckets.length-1));
+    const y = value => margin.top + height - height * value/max;
+    for (const type of types) {
+      const points = buckets.map((bucket, index) => `${x(index)},${y(values.get(`${bucket}|${type}`) || 0)}`).join(' ');
+      svg.append(svgElement('polyline', {points, fill:'none', stroke:colors[type] || '#ffffff', 'stroke-width':'3', 'stroke-linejoin':'round'}));
+      const item = document.createElement('span');
+      const dot = document.createElement('i'); dot.className = 'dot'; dot.style.background = colors[type] || '#ffffff';
+      item.append(dot, document.createTextNode(type)); legend.append(item);
+    }
+    const ticks = [...new Set([0, Math.floor((buckets.length-1)/2), buckets.length-1])];
+    for (const index of ticks) {
+      const label = svgElement('text', {x:x(index), y:318, fill:'#9fb1c6', 'text-anchor':'middle', 'font-size':'11'});
+      label.textContent = new Date(buckets[index]).toLocaleDateString('id-ID', {day:'2-digit', month:'short', timeZone:'UTC'});
+      svg.append(label);
+    }
+  }
+
+  function renderSeverity(rows) {
+    const root = document.getElementById('severity'); root.replaceChildren();
+    const max = Math.max(1, ...rows.map(row => Number(row.count)));
+    if (!rows.length) { const empty = document.createElement('div'); empty.className='empty'; empty.textContent='Tidak ada data'; root.append(empty); return; }
+    for (const row of rows) {
+      const wrapper = document.createElement('div'); wrapper.className='severity-row';
+      const meta = document.createElement('div'); meta.className='severity-meta';
+      const name = document.createElement('span'); name.textContent=row.name;
+      const count = document.createElement('strong'); count.textContent=Number(row.count).toLocaleString('id-ID');
+      meta.append(name,count);
+      const bar = document.createElement('div'); bar.className='bar';
+      const fill = document.createElement('span'); fill.style.width = `${100*Number(row.count)/max}%`; bar.append(fill);
+      wrapper.append(meta,bar); root.append(wrapper);
+    }
+  }
+
+  function renderAreas(rows) {
+    const body = document.getElementById('areas'); body.replaceChildren();
+    for (const row of rows.slice(0, 50)) {
+      const tr=document.createElement('tr'), area=document.createElement('td'), count=document.createElement('td');
+      area.textContent=row.name || '(tanpa nama)'; count.textContent=Number(row.count).toLocaleString('id-ID');
+      tr.append(area,count); body.append(tr);
+    }
+    if (!rows.length) {
+      const tr=document.createElement('tr'), td=document.createElement('td'); td.colSpan=2; td.className='empty'; td.textContent='Tidak ada data'; tr.append(td); body.append(tr);
+    }
+  }
+
+  document.getElementById('refresh').addEventListener('click', load);
+  range.addEventListener('change', load);
+  load();
+</script>
+</body>
+</html>

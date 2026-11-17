@@ -32,6 +32,9 @@ spec:
           image: aat/bnpb-consumer-dashboard:dev
           ports: [{ containerPort: 8000, name: http }]
           envFrom: [{ configMapRef: { name: bnpb-consumer-dashboard-config } }]
+          env:
+            - name: AUDIT_TOKEN
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: AUDIT_TOKEN } }
           volumeMounts: [{ name: data, mountPath: /data }]
           readinessProbe:
             httpGet: { path: /health, port: http }

@@ -21,7 +21,7 @@ func TestIssueUsesIdentitySpecificScopes(t *testing.T) {
 		role   string
 	}{
 		{id: "media", secret: "media-secret", scope: ScopeHazardsSummary, role: "media"},
-		{id: "field", secret: "field-secret", scope: ScopeHazardsRead, role: "field"},
+		{id: "field", secret: "field-secret", scope: ScopeHazardsRead + " " + ScopeFieldReportsWrite, role: "field"},
 		{id: "ops", secret: "ops-secret", scope: ScopeHazardsRead, role: "ops"},
 	}
 	for _, test := range tests {
@@ -174,7 +174,7 @@ func newTestService(t *testing.T) *Service {
 		RefreshTTL:     10 * time.Minute,
 		Clients: []Client{
 			{ID: "media", Secret: "media-secret", Scope: ScopeHazardsSummary, Role: "media"},
-			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead, Role: "field"},
+			{ID: "field", Secret: "field-secret", Scope: ScopeHazardsRead + " " + ScopeFieldReportsWrite, Role: "field"},
 			{ID: "ops", Secret: "ops-secret", Scope: ScopeHazardsRead, Role: "ops"},
 		},
 	})

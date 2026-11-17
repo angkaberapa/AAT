@@ -29,6 +29,9 @@ type Config struct {
 	MediaMaxConcurrentRequests int
 	RateLimitRPS               int // per client identity (JWT subject)
 	RateLimitBurst             int
+	// P3: Tim Lapangan writes use a dedicated authenticated lane.
+	FieldReportIngestToken   string
+	FieldReportMaxConcurrent int
 }
 
 func Load() (Config, error) {
@@ -50,11 +53,14 @@ func Load() (Config, error) {
 		MediaMaxConcurrentRequests: e.Int("MEDIA_MAX_CONCURRENT_REQUESTS", 96),
 		RateLimitRPS:               e.Int("RATE_LIMIT_RPS", 300),
 		RateLimitBurst:             e.Int("RATE_LIMIT_BURST", 600),
+		FieldReportIngestToken:     e.Required("FIELD_REPORT_INGEST_TOKEN"),
+		FieldReportMaxConcurrent:   e.Int("FIELD_REPORT_MAX_CONCURRENT", 16),
 	}
 	e.Check(c.MaxConcurrentRequests >= 0, "MAX_CONCURRENT_REQUESTS must not be negative")
 	e.Check(c.MediaMaxConcurrentRequests >= 0, "MEDIA_MAX_CONCURRENT_REQUESTS must not be negative")
 	e.Check(c.MaxConcurrentRequests == 0 || c.MediaMaxConcurrentRequests <= c.MaxConcurrentRequests, "MEDIA_MAX_CONCURRENT_REQUESTS must not exceed MAX_CONCURRENT_REQUESTS")
 	e.Check(c.RateLimitRPS >= 0, "RATE_LIMIT_RPS must not be negative")
 	e.Check(c.RateLimitBurst >= 1, "RATE_LIMIT_BURST must be at least 1")
+	e.Check(c.FieldReportMaxConcurrent >= 1, "FIELD_REPORT_MAX_CONCURRENT must be at least 1")
 	return c, e.Err()
 }

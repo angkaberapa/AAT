@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -30,7 +33,7 @@ func WithSnapshotLimits(def, upper int) Option {
 
 // Reader = yang dibutuhin api dari store. sengaja interface kecil, biar gampang dimock waktu test handler.
 type Reader interface {
-	List(ctx context.Context, f store.Filter) ([]domain.HazardEvent, error)
+	ListPage(ctx context.Context, f store.Filter) (store.Page, error)
 	Get(ctx context.Context, hazardID string) (*domain.HazardEvent, error)
 }
 
@@ -54,17 +57,27 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 			return
 		}
 
-		events, err := reader.List(r.Context(), filter)
+		page, err := reader.ListPage(r.Context(), filter)
 		if err != nil {
 			logger.ErrorContext(r.Context(), "list hazard events failed", "error", err.Error())
-			writeError(w, http.StatusInternalServerError, "failed to read hazard events")
+			writeError(w, http.StatusServiceUnavailable, "hazard storage is temporarily unavailable")
 			return
 		}
 
 		//data dari store tetap dilayani walau sumbernya lagi mati; meta.sources ngasih tau seberapa basi datanya.
 		meta := freshnessMeta(statuses, relevantSources(filter, statuses))
+		meta["partial"] = page.Partial
+		if page.UnavailableUnits == nil {
+			meta["unavailable_units"] = []string{}
+		} else {
+			meta["unavailable_units"] = page.UnavailableUnits
+		}
 		w.Header().Set(HeaderDataStale, strconv.FormatBool(meta["stale"].(bool)))
-		core.WriteJSON(w, http.StatusOK, map[string]any{"data": events, "meta": meta})
+		response := map[string]any{"data": page.Items, "meta": meta}
+		if filter.Order == store.OrderLatest {
+			response["next_cursor"] = encodeLatestCursor(page.Next)
+		}
+		core.WriteJSON(w, http.StatusOK, response)
 	})
 
 	//status lengkap per sumber (termasuk pesan error terakhir), buat operator / debugging.
@@ -76,7 +89,7 @@ func Register(mux *http.ServeMux, logger *slog.Logger, reader Reader, statuses S
 		event, err := reader.Get(r.Context(), r.PathValue("id"))
 		if err != nil {
 			logger.ErrorContext(r.Context(), "get hazard event failed", "error", err.Error())
-			writeError(w, http.StatusInternalServerError, "failed to read hazard event")
+			writeError(w, http.StatusServiceUnavailable, "hazard storage is temporarily unavailable")
 			return
 		}
 		if event == nil {
@@ -102,6 +115,26 @@ func parseFilter(r *http.Request, limits snapshotLimits) (store.Filter, string) 
 			return f, "invalid 'since', expected ISO 8601 UTC e.g. 2026-09-25T10:00:00Z"
 		}
 		f.Since = &t
+	}
+
+	if raw := q.Get("sort"); raw != "" {
+		if raw != string(store.OrderLatest) {
+			return f, "invalid 'sort', expected latest"
+		}
+		f.Order = store.OrderLatest
+	}
+	if raw := q.Get("cursor"); raw != "" {
+		if f.Order != store.OrderLatest {
+			return f, "'cursor' requires sort=latest"
+		}
+		cursor, err := decodeLatestCursor(raw)
+		if err != nil {
+			return f, "invalid 'cursor'"
+		}
+		f.Cursor = &cursor
+	}
+	if f.Order == store.OrderLatest && f.Since != nil {
+		return f, "'since' cannot be combined with sort=latest"
 	}
 
 	if raw := q.Get("source"); raw != "" {
@@ -138,6 +171,45 @@ func parseFilter(r *http.Request, limits snapshotLimits) (store.Filter, string) 
 	}
 
 	return f, ""
+}
+
+type latestCursorPayload struct {
+	Version    int       `json:"v"`
+	Sort       string    `json:"sort"`
+	OccurredAt time.Time `json:"occurred_at"`
+	HazardID   string    `json:"hazard_id"`
+}
+
+func encodeLatestCursor(cursor *store.LatestCursor) any {
+	if cursor == nil {
+		return nil
+	}
+	payload, err := json.Marshal(latestCursorPayload{
+		Version:    1,
+		Sort:       string(store.OrderLatest),
+		OccurredAt: cursor.OccurredAt.UTC(),
+		HazardID:   cursor.HazardID,
+	})
+	if err != nil {
+		return nil
+	}
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeLatestCursor(raw string) (store.LatestCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return store.LatestCursor{}, err
+	}
+	var payload latestCursorPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return store.LatestCursor{}, err
+	}
+	if payload.Version != 1 || payload.Sort != string(store.OrderLatest) ||
+		payload.OccurredAt.IsZero() || payload.HazardID == "" {
+		return store.LatestCursor{}, errors.New("unsupported or incomplete cursor")
+	}
+	return store.LatestCursor{OccurredAt: payload.OccurredAt.UTC(), HazardID: payload.HazardID}, nil
 }
 
 // Header penanda kebaruan data (P2). Dipasang di semua respons baca; bnpb-api meneruskannya ke client.

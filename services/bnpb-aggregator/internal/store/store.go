@@ -6,27 +6,34 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sort"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/event"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
 
-// semua event masuk ke satu collection. belum ada rencana sharding.
 const (
 	collectionName = "hazard_events"
 )
 
 type Store struct {
-	client     *mongo.Client
-	events     *mongo.Collection
-	leadership *mongo.Collection // P2 M2: dokumen fence (epoch leader)
-	statuses   *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
+	client       *mongo.Client
+	events       *mongo.Collection
+	leadership   *mongo.Collection // P2 M2: dokumen fence (epoch leader)
+	statuses     *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
+	unprocessed  *mongo.Collection // P3: raw messages that could not be processed
+	fieldReports *mongo.Collection // P3: durable Tim Lapangan inbox
+	mongoURI     string
+	database     string
 }
+
 const serverSelectionTimeout = 3 * time.Second
 
 // New bikin koneksi + pastiin index ada. sengaja gak pakai schema, biar nambah field di Attributes gak perlu migrasi.
@@ -34,6 +41,8 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 	client, err := mongo.Connect(options.Client().
 		ApplyURI(uri).
 		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true}).
+		SetReadConcern(readconcern.Majority()).
+		SetWriteConcern(writeconcern.Majority()).
 		SetServerSelectionTimeout(serverSelectionTimeout).
 		SetMonitor(latencyMonitor(logger)))
 	if err != nil {
@@ -47,33 +56,96 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 
 	events := client.Database(database).Collection(collectionName)
 
-	//source + source_ref_id = natural key. retry/repoll harus jadi upsert, bukan duplikat.
-	indexes := []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		},
-		//todo: cek lagi apakah index ini kepake. setauku query List selalu pakai sort ingested_at, jadi kemungkinan iya.
-		{Keys: bson.D{{Key: "ingested_at", Value: 1}}},
-		//hazard_id = hash(source + source_ref_id). dipakai buat get by id.
-		{
-			Keys:    bson.D{{Key: "hazard_id", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		},
+	if err := migrateLegacyEventIndexes(ctx, events); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("migrate event indexes: %w", err)
 	}
-	_, err = events.Indexes().CreateMany(ctx, append(indexes, outboxIndexes()...))
+	_, err = events.Indexes().CreateMany(ctx, append(eventIndexes(), outboxIndexes()...))
 	if err != nil {
 		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("create indexes: %w", err)
 	}
 
 	db := client.Database(database)
+	unprocessed := db.Collection(unprocessedCollection)
+	if _, err := unprocessed.Indexes().CreateMany(ctx, unprocessedIndexes()); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("create unprocessed indexes: %w", err)
+	}
+	fieldReports := db.Collection(fieldReportsCollection)
+	if _, err := fieldReports.Indexes().CreateMany(ctx, fieldReportIndexes()); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("create field report indexes: %w", err)
+	}
 	return &Store{
-		client:     client,
-		events:     events,
-		leadership: db.Collection(leadershipCollection),
-		statuses:   db.Collection(sourceStatusCollect),
+		client:       client,
+		events:       events,
+		leadership:   db.Collection(leadershipCollection),
+		statuses:     db.Collection(sourceStatusCollect),
+		unprocessed:  unprocessed,
+		fieldReports: fieldReports,
+		mongoURI:     uri,
+		database:     database,
 	}, nil
+}
+
+// eventIndexes returns indexes that remain valid after hazard_events is sharded by {hazard_id: 1}
+func eventIndexes() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "hazard_id", Value: 1}},
+			Options: options.Index().SetUnique(true),
+		},
+		{
+			Keys: bson.D{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
+			Options: options.Index().
+				SetName("source_ref_lookup"),
+		},
+		{
+			Keys: bson.D{{Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+			Options: options.Index().
+				SetName("audit_ingested_order"),
+		},
+		{
+			Keys: bson.D{{Key: "source", Value: 1}, {Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+			Options: options.Index().
+				SetName("audit_source_ingested_order"),
+		},
+		{
+			Keys: bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}},
+			Options: options.Index().
+				SetName("latest_hazard_order"),
+		},
+	}
+}
+
+func migrateLegacyEventIndexes(ctx context.Context, events *mongo.Collection) error {
+	cur, err := events.Indexes().List(ctx)
+	if err != nil {
+		var commandErr mongo.CommandError
+		if errors.As(err, &commandErr) && commandErr.Code == 26 { // NamespaceNotFound
+			return nil
+		}
+		return fmt.Errorf("list event indexes: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var indexes []struct {
+		Name   string `bson:"name"`
+		Unique bool   `bson:"unique"`
+	}
+	if err := cur.All(ctx, &indexes); err != nil {
+		return fmt.Errorf("decode event indexes: %w", err)
+	}
+	for _, index := range indexes {
+		if index.Name != "source_1_source_ref_id_1" || !index.Unique {
+			continue
+		}
+		if err := events.Indexes().DropOne(ctx, index.Name); err != nil {
+			return fmt.Errorf("drop legacy unique source index: %w", err)
+		}
+	}
+	return nil
 }
 
 func latencyMonitor(logger *slog.Logger) *event.CommandMonitor {
@@ -99,14 +171,37 @@ type Filter struct {
 	Source     domain.Source
 	HazardType domain.HazardType
 	Severity   domain.Severity
+	Order      Order
+	Cursor     *LatestCursor
 	//Limit > 0 batasi ukuran snapshot (P2): Limit event TERBARU, tetap urut naik.
 	//Diabaikan kalau Since diisi: banyak event bisa punya ingested_at yang sama persis
 	//(satu batch), jadi motong hasil inkremental bikin event dengan timestamp kembar kelewat.
 	Limit int
 }
 
+type Order string
+
+const OrderLatest Order = "latest"
+
+type LatestCursor struct {
+	OccurredAt time.Time
+	HazardID   string
+}
+
+type Page struct {
+	Items            []domain.HazardEvent
+	Next             *LatestCursor
+	Partial          bool
+	UnavailableUnits []string
+}
+
 // List balikin event yang match, urut dari yang paling lama di-ingest. hasilnya gak pernah nil, biar caller gak perlu cek.
 func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error) {
+	page, err := s.ListPage(ctx, f)
+	return page.Items, err
+}
+
+func (s *Store) ListPage(ctx context.Context, f Filter) (Page, error) {
 	filter := bson.D{}
 
 	if f.Since != nil {
@@ -124,7 +219,30 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 	if f.Severity != "" {
 		filter = append(filter, bson.E{Key: "severity", Value: f.Severity})
 	}
+	if f.Order == OrderLatest {
+		page, err := listLatestPageFromCollection(ctx, s.events, filter, f)
+		if err == nil {
+			return page, nil
+		}
+		fallback, fallbackErr := s.listPageByShard(ctx, filter, f)
+		if fallbackErr == nil {
+			return fallback, nil
+		}
+		return Page{}, fmt.Errorf("find latest hazard events: %w (fallback: %v)", err, fallbackErr)
+	}
 
+	page, err := listPageFromCollection(ctx, s.events, filter, f)
+	if err == nil {
+		return page, nil
+	}
+	fallback, fallbackErr := s.listPageByShard(ctx, filter, f)
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return Page{}, fmt.Errorf("find hazard events: %w (fallback: %v)", err, fallbackErr)
+}
+
+func listPageFromCollection(ctx context.Context, collection *mongo.Collection, filter bson.D, f Filter) (Page, error) {
 	newestFirst := f.Limit > 0 && f.Since == nil
 	opts := options.Find().SetSort(bson.D{{Key: "ingested_at", Value: 1}})
 	if newestFirst {
@@ -132,20 +250,125 @@ func (s *Store) List(ctx context.Context, f Filter) ([]domain.HazardEvent, error
 		opts.SetSort(bson.D{{Key: "ingested_at", Value: -1}}).SetLimit(int64(f.Limit))
 	}
 
-	cur, err := s.events.Find(ctx, filter, opts)
+	cur, err := collection.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("find hazard events: %w", err)
+		return Page{}, fmt.Errorf("find hazard events: %w", err)
 	}
 
 	//sengaja di-init, biar json-nya `[]` bukan `null` kalau kosong.
 	events := []domain.HazardEvent{}
 	if err := cur.All(ctx, &events); err != nil {
-		return nil, fmt.Errorf("decode hazard events: %w", err)
+		return Page{}, fmt.Errorf("decode hazard events: %w", err)
 	}
 	if newestFirst {
 		slices.Reverse(events)
 	}
-	return events, nil
+	return Page{Items: events}, nil
+}
+
+func listLatestPageFromCollection(ctx context.Context, collection *mongo.Collection, filter bson.D, f Filter) (Page, error) {
+	if f.Limit <= 0 {
+		return Page{}, errors.New("latest hazard page requires a positive limit")
+	}
+	if f.Cursor != nil {
+		filter = append(filter, bson.E{Key: "$or", Value: latestCursorPredicate(*f.Cursor)})
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}}).
+		SetLimit(int64(f.Limit + 1))
+	cur, err := collection.Find(ctx, filter, opts)
+	if err != nil {
+		return Page{}, fmt.Errorf("find latest hazard events: %w", err)
+	}
+
+	events := []domain.HazardEvent{}
+	if err := cur.All(ctx, &events); err != nil {
+		return Page{}, fmt.Errorf("decode latest hazard events: %w", err)
+	}
+	if len(events) <= f.Limit {
+		return Page{Items: events}, nil
+	}
+
+	events = events[:f.Limit]
+	last := events[len(events)-1]
+	return Page{
+		Items: events,
+		Next:  &LatestCursor{OccurredAt: last.OccurredAt, HazardID: last.HazardID},
+	}, nil
+}
+
+func (s *Store) listPageByShard(ctx context.Context, filter bson.D, f Filter) (Page, error) {
+	mongos, err := s.isMongos(ctx)
+	if err != nil || !mongos {
+		return Page{}, errors.New("partial fallback requires mongos")
+	}
+	shards, err := s.listShards(ctx)
+	if err != nil {
+		return Page{}, err
+	}
+
+	items := []domain.HazardEvent{}
+	unavailable := []string{}
+	hasMore := false
+	for _, shard := range shards {
+		client, connectErr := s.connectShard(shard.ReplicaSet, shard.Hosts)
+		if connectErr != nil {
+			unavailable = append(unavailable, shard.ID)
+			continue
+		}
+		collection := client.Database(s.database).Collection(collectionName)
+		var part Page
+		if f.Order == OrderLatest {
+			part, err = listLatestPageFromCollection(ctx, collection, filter, f)
+		} else {
+			part, err = listPageFromCollection(ctx, collection, filter, f)
+		}
+		_ = client.Disconnect(context.WithoutCancel(ctx))
+		if err != nil {
+			unavailable = append(unavailable, shard.ID)
+			continue
+		}
+		hasMore = hasMore || part.Next != nil
+		items = append(items, part.Items...)
+	}
+	if len(items) == 0 && len(unavailable) == len(shards) {
+		return Page{}, errors.New("no shard is reachable")
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if f.Order == OrderLatest {
+			if items[i].OccurredAt.Equal(items[j].OccurredAt) {
+				return items[i].HazardID > items[j].HazardID
+			}
+			return items[i].OccurredAt.After(items[j].OccurredAt)
+		}
+		if items[i].IngestedAt.Equal(items[j].IngestedAt) {
+			return items[i].HazardID < items[j].HazardID
+		}
+		return items[i].IngestedAt.Before(items[j].IngestedAt)
+	})
+
+	page := Page{Items: items, Partial: len(unavailable) > 0, UnavailableUnits: unavailable}
+	if f.Order == OrderLatest && (len(items) > f.Limit || hasMore) {
+		if len(page.Items) > f.Limit {
+			page.Items = items[:f.Limit]
+		}
+		last := page.Items[len(page.Items)-1]
+		page.Next = &LatestCursor{OccurredAt: last.OccurredAt, HazardID: last.HazardID}
+	} else if f.Order != OrderLatest && f.Limit > 0 && f.Since == nil && len(items) > f.Limit {
+		page.Items = items[len(items)-f.Limit:]
+	}
+	return page, nil
+}
+
+func latestCursorPredicate(cursor LatestCursor) bson.A {
+	return bson.A{
+		bson.D{{Key: "occurred_at", Value: bson.D{{Key: "$lt", Value: cursor.OccurredAt}}}},
+		bson.D{
+			{Key: "occurred_at", Value: cursor.OccurredAt},
+			{Key: "hazard_id", Value: bson.D{{Key: "$lt", Value: cursor.HazardID}}},
+		},
+	}
 }
 
 // Get by hazard_id. return (nil, nil) kalau gak ketemu, caller yang mutusin mau 404 atau bukan.

@@ -31,8 +31,16 @@ class OutageMode(str, Enum):
     HANG = "hang"
 
 
-SchemaVersion = Literal[1, 2]
+SchemaVersion = Literal[1, 2, 3, 4, 5]
 HealthStatus = Literal["ok", "outage"]
+
+
+class PayloadMode(str, Enum):
+    NORMAL = "normal"
+    TRUNCATED = "truncated"
+    DEEP = "deep"
+    INVALID_UTF8 = "invalid_utf8"
+    OVERSIZED = "oversized"
 
 
 class VolcanicReport(BaseModel):
@@ -70,6 +78,14 @@ class SchemaVersionResponse(BaseModel):
     """Current schema version returned by the admin endpoint"""
 
     schema_version: SchemaVersion
+
+
+class PayloadModeRequest(BaseModel):
+    mode: PayloadMode
+
+
+class PayloadModeResponse(BaseModel):
+    mode: PayloadMode
 
 
 class OutageRequest(BaseModel):

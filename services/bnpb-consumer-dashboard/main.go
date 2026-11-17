@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/analytics"
 	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/consumer"
 	"github.com/angkaberapa/AAT/services/bnpb-consumer-dashboard/internal/core"
@@ -33,6 +34,7 @@ func main() {
 	}
 	mux := core.NewMux(cfg.ServiceName)
 	dash.Register(mux)
+	analytics.New(cfg.AggregatorBaseURL, cfg.AuditToken, cfg.AnalyticsTimeout, logger).Register(mux)
 
 	// P5: subscribe to the hazard topic with our own consumer group. The producer does
 	// not know this consumer exists.

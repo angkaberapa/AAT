@@ -84,7 +84,7 @@ func ContentHash(e domain.HazardEvent) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// save upserts e by (source, source_ref_id). Dipanggil di dalam transaksi ter-fence (SaveBatch).
+// save upserts e by hazard_id. Dipanggil di dalam transaksi ter-fence (SaveBatch).
 //   - new event        -> inserted, outbox.version 1, pending
 //   - changed content  -> event fields updated (ingested_at kept, R4), version + 1, pending
 //   - same content     -> nothing written, version unchanged, not published
@@ -93,14 +93,14 @@ func ContentHash(e domain.HazardEvent) (string, error) {
 // error dari upsert, tetapi di dalam transaksi error itu membatalkan seluruh transaksi. Sekarang
 // hash dibaca dulu; di dalam transaksi baca + tulis ini tetap atomik (snapshot + write conflict).
 func (s *Store) save(ctx context.Context, e domain.HazardEvent) (SaveResult, error) {
+	if e.HazardID == "" {
+		return "", errors.New("save hazard event: hazard_id is required")
+	}
 	hash, err := ContentHash(e)
 	if err != nil {
 		return "", err
 	}
-	key := bson.D{
-		{Key: "source", Value: e.Source},
-		{Key: "source_ref_id", Value: e.SourceRefID},
-	}
+	key := eventIdentityFilter(e)
 
 	var existing struct {
 		Outbox struct {
@@ -139,6 +139,12 @@ func (s *Store) save(ctx context.Context, e domain.HazardEvent) (SaveResult, err
 		return Updated, nil
 	}
 	return Inserted, nil
+}
+
+// eventIdentityFilter intentionally contains only the future shard key. This keeps reads and
+// upserts targeted to one shard instead of broadcasting them through mongos.
+func eventIdentityFilter(e domain.HazardEvent) bson.D {
+	return bson.D{{Key: "hazard_id", Value: e.HazardID}}
 }
 
 func toDocument(e domain.HazardEvent) (bson.M, error) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/config"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/core"
+	"github.com/angkaberapa/AAT/services/bnpb-api/internal/fieldreports"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/hazards"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/limit"
 	"github.com/angkaberapa/AAT/services/bnpb-api/internal/security"
@@ -46,6 +47,11 @@ func main() {
 		logger.Error("initialize hazard handler", "error", err)
 		os.Exit(1)
 	}
+	fieldReportHandler, err := fieldreports.New(cfg.AggregatorBaseURL, cfg.FieldReportIngestToken, httpClient)
+	if err != nil {
+		logger.Error("initialize field report handler", "error", err)
+		os.Exit(1)
+	}
 	// P2: global in-flight cap first (cheap, protects even token verification), then
 	// authentication, then P5 priority admission, then a per-client token bucket.
 	concurrency := limit.Concurrency(cfg.MaxConcurrentRequests)
@@ -62,6 +68,10 @@ func main() {
 	})
 	hazardHandler.Register(mux, func(next http.Handler) http.Handler {
 		return concurrency(verifier.Middleware(priority.Middleware(perClient.Middleware(next))))
+	})
+	fieldConcurrency := limit.Concurrency(cfg.FieldReportMaxConcurrent)
+	fieldReportHandler.Register(mux, func(next http.Handler) http.Handler {
+		return verifier.Middleware(fieldConcurrency(next))
 	})
 
 	if err := core.Serve(ctx, logger, cfg.Port, mux); err != nil {

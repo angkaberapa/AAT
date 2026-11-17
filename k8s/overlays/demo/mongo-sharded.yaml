@@ -1,0 +1,565 @@
+# Full P1 demonstration topology. The six data-bearing Kubernetes nodes must be labelled:
+# bnpb.io/physical-host: host-a | host-b | host-c
+# bnpb.io/mongo-shard: shard-0 | shard-1
+# Each physical host supplies one node for each shard.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-replica-bootstrap
+data:
+  bootstrap.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Only ordinal zero initializes its replica set. Other members merely join it.
+    case "$HOSTNAME" in
+      *-0) ;;
+      *) exit 0 ;;
+    esac
+
+    auth=(
+      -u "$MONGO_ROOT_USER"
+      -p "$MONGO_ROOT_PASSWORD"
+      --authenticationDatabase admin
+    )
+
+    # On a normal restart the replica set and user already exist.
+    for _ in $(seq 1 120); do
+      if mongosh --quiet --host 127.0.0.1 "${auth[@]}" \
+        --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)' >/dev/null 2>&1; then
+        exit 0
+      fi
+      if mongosh --quiet --host 127.0.0.1 \
+        --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)' >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+    done
+
+    mongosh --quiet --host 127.0.0.1 --eval '
+      try {
+        rs.status().ok;
+      } catch (error) {
+        const result = rs.initiate(JSON.parse(process.env.REPLICA_CONFIG));
+        if (!result.ok && result.codeName !== "AlreadyInitialized") quit(1);
+      }
+    '
+
+    until mongosh --quiet --host 127.0.0.1 \
+      --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do
+      sleep 2
+    done
+
+    mongosh --quiet --host 127.0.0.1 --eval '
+      const admin = db.getSiblingDB("admin");
+      if (!admin.getUser(process.env.MONGO_ROOT_USER)) {
+        admin.createUser({
+          user: process.env.MONGO_ROOT_USER,
+          pwd: process.env.MONGO_ROOT_PASSWORD,
+          roles: [{role: "root", db: "admin"}]
+        });
+      }
+    '
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-config-headless
+  labels: { app: mongo-config, role: store }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: mongo-config }
+  ports: [{ name: mongo, port: 27017, targetPort: mongo }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo-config
+  labels: { app: mongo-config, role: store }
+spec:
+  serviceName: mongo-config-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: mongo-config }
+  template:
+    metadata:
+      labels: { app: mongo-config, role: store }
+    spec:
+      enableServiceLinks: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: bnpb.io/physical-host
+              labelSelector:
+                matchLabels: { app: mongo-config }
+      initContainers:
+        - name: keyfile
+          image: mongo:7
+          command: ["sh", "-c", "cp /source/key /keyfile/key && chown 999:999 /keyfile/key && chmod 400 /keyfile/key"]
+          volumeMounts:
+            - { name: key-source, mountPath: /source, readOnly: true }
+            - { name: keyfile, mountPath: /keyfile }
+          resources:
+            requests: { memory: 32Mi, cpu: 10m }
+            limits: { memory: 64Mi }
+      containers:
+        - name: mongo
+          image: mongo:7
+          args: ["--configsvr", "--replSet", "config-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--dbpath", "/data/db", "--wiredTigerCacheSizeGB", "0.25"]
+          lifecycle:
+            postStart:
+              exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
+          ports: [{ containerPort: 27017, name: mongo }]
+          env:
+            - name: MONGO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+            - name: REPLICA_CONFIG
+              value: '{"_id":"config-rs","configsvr":true,"members":[{"_id":0,"host":"mongo-config-0.mongo-config-headless:27017"},{"_id":1,"host":"mongo-config-1.mongo-config-headless:27017"},{"_id":2,"host":"mongo-config-2.mongo-config-headless:27017"}]}'
+          volumeMounts:
+            - { name: data, mountPath: /data/db }
+            - { name: keyfile, mountPath: /keyfile }
+            - { name: bootstrap, mountPath: /bootstrap, readOnly: true }
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  mongosh --quiet -u "$MONGO_ROOT_USER"
+                  -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin
+                  --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 512Mi, cpu: 100m }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: key-source
+          secret:
+            secretName: bnpb-secrets
+            defaultMode: 0400
+            items: [{ key: MONGO_CLUSTER_KEY, path: key }]
+        - { name: keyfile, emptyDir: {} }
+        - name: bootstrap
+          configMap: { name: mongo-replica-bootstrap }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-shard-0-headless
+  labels: { app: mongo-shard-0, role: store }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: mongo-shard-0 }
+  ports: [{ name: mongo, port: 27017, targetPort: mongo }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo-shard-0
+  labels: { app: mongo-shard-0, role: store, storage-unit: shard-0 }
+spec:
+  serviceName: mongo-shard-0-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: mongo-shard-0 }
+  template:
+    metadata:
+      labels: { app: mongo-shard-0, role: store, storage-unit: shard-0 }
+    spec:
+      enableServiceLinks: false
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: bnpb.io/mongo-shard, operator: In, values: [shard-0] }
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: bnpb.io/physical-host
+              labelSelector:
+                matchLabels: { app: mongo-shard-0 }
+      initContainers:
+        - name: keyfile
+          image: mongo:7
+          command: ["sh", "-c", "cp /source/key /keyfile/key && chown 999:999 /keyfile/key && chmod 400 /keyfile/key"]
+          volumeMounts:
+            - { name: key-source, mountPath: /source, readOnly: true }
+            - { name: keyfile, mountPath: /keyfile }
+          resources:
+            requests: { memory: 32Mi, cpu: 10m }
+            limits: { memory: 64Mi }
+      containers:
+        - name: mongo
+          image: mongo:7
+          args: ["--shardsvr", "--replSet", "shard0-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+          lifecycle:
+            postStart:
+              exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
+          ports: [{ containerPort: 27017, name: mongo }]
+          env:
+            - name: MONGO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+            - name: REPLICA_CONFIG
+              value: '{"_id":"shard0-rs","members":[{"_id":0,"host":"mongo-shard-0-0.mongo-shard-0-headless:27017"},{"_id":1,"host":"mongo-shard-0-1.mongo-shard-0-headless:27017"},{"_id":2,"host":"mongo-shard-0-2.mongo-shard-0-headless:27017"}]}'
+          volumeMounts:
+            - { name: data, mountPath: /data/db }
+            - { name: keyfile, mountPath: /keyfile }
+            - { name: bootstrap, mountPath: /bootstrap, readOnly: true }
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  mongosh --quiet -u "$MONGO_ROOT_USER"
+                  -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin
+                  --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 512Mi, cpu: 100m }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: key-source
+          secret:
+            secretName: bnpb-secrets
+            defaultMode: 0400
+            items: [{ key: MONGO_CLUSTER_KEY, path: key }]
+        - { name: keyfile, emptyDir: {} }
+        - name: bootstrap
+          configMap: { name: mongo-replica-bootstrap }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-shard-1-headless
+  labels: { app: mongo-shard-1, role: store }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: mongo-shard-1 }
+  ports: [{ name: mongo, port: 27017, targetPort: mongo }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo-shard-1
+  labels: { app: mongo-shard-1, role: store, storage-unit: shard-1 }
+spec:
+  serviceName: mongo-shard-1-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: mongo-shard-1 }
+  template:
+    metadata:
+      labels: { app: mongo-shard-1, role: store, storage-unit: shard-1 }
+    spec:
+      enableServiceLinks: false
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: bnpb.io/mongo-shard, operator: In, values: [shard-1] }
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: bnpb.io/physical-host
+              labelSelector:
+                matchLabels: { app: mongo-shard-1 }
+      initContainers:
+        - name: keyfile
+          image: mongo:7
+          command: ["sh", "-c", "cp /source/key /keyfile/key && chown 999:999 /keyfile/key && chmod 400 /keyfile/key"]
+          volumeMounts:
+            - { name: key-source, mountPath: /source, readOnly: true }
+            - { name: keyfile, mountPath: /keyfile }
+          resources:
+            requests: { memory: 32Mi, cpu: 10m }
+            limits: { memory: 64Mi }
+      containers:
+        - name: mongo
+          image: mongo:7
+          args: ["--shardsvr", "--replSet", "shard1-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+          lifecycle:
+            postStart:
+              exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
+          ports: [{ containerPort: 27017, name: mongo }]
+          env:
+            - name: MONGO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+            - name: REPLICA_CONFIG
+              value: '{"_id":"shard1-rs","members":[{"_id":0,"host":"mongo-shard-1-0.mongo-shard-1-headless:27017"},{"_id":1,"host":"mongo-shard-1-1.mongo-shard-1-headless:27017"},{"_id":2,"host":"mongo-shard-1-2.mongo-shard-1-headless:27017"}]}'
+          volumeMounts:
+            - { name: data, mountPath: /data/db }
+            - { name: keyfile, mountPath: /keyfile }
+            - { name: bootstrap, mountPath: /bootstrap, readOnly: true }
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  mongosh --quiet -u "$MONGO_ROOT_USER"
+                  -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin
+                  --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 512Mi, cpu: 100m }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: key-source
+          secret:
+            secretName: bnpb-secrets
+            defaultMode: 0400
+            items: [{ key: MONGO_CLUSTER_KEY, path: key }]
+        - { name: keyfile, emptyDir: {} }
+        - name: bootstrap
+          configMap: { name: mongo-replica-bootstrap }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-router
+  labels: { app: mongo-router, role: other }
+spec:
+  selector: { app: mongo-router }
+  ports: [{ name: mongo, port: 27017, targetPort: mongo }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-router
+  labels: { app: mongo-router, role: other }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: mongo-router }
+  template:
+    metadata:
+      labels: { app: mongo-router, role: other }
+    spec:
+      enableServiceLinks: false
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: bnpb.io/physical-host
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: mongo-router }
+      initContainers:
+        - name: keyfile
+          image: mongo:7
+          command: ["sh", "-c", "cp /source/key /keyfile/key && chown 999:999 /keyfile/key && chmod 400 /keyfile/key"]
+          volumeMounts:
+            - { name: key-source, mountPath: /source, readOnly: true }
+            - { name: keyfile, mountPath: /keyfile }
+          resources:
+            requests: { memory: 32Mi, cpu: 10m }
+            limits: { memory: 64Mi }
+      containers:
+        - name: mongos
+          image: mongo:7
+          args:
+            - mongos
+            - --configdb
+            - config-rs/mongo-config-0.mongo-config-headless:27017,mongo-config-1.mongo-config-headless:27017,mongo-config-2.mongo-config-headless:27017
+            - --keyFile
+            - /keyfile/key
+            - --bind_ip_all
+          ports: [{ containerPort: 27017, name: mongo }]
+          env:
+            - name: MONGO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+          volumeMounts: [{ name: keyfile, mountPath: /keyfile }]
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  mongosh --quiet -u "$MONGO_ROOT_USER" -p "$MONGO_ROOT_PASSWORD"
+                  --authenticationDatabase admin
+                  --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: key-source
+          secret:
+            secretName: bnpb-secrets
+            defaultMode: 0400
+            items: [{ key: MONGO_CLUSTER_KEY, path: key }]
+        - { name: keyfile, emptyDir: {} }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-bootstrap-v1
+  labels: { app: mongo-bootstrap, role: other }
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels: { app: mongo-bootstrap, role: other }
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: bootstrap
+          image: mongo:7
+          env:
+            - name: MONGO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_USER } }
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
+          command:
+            - bash
+            - -ceu
+            - |
+              auth=(-u "$MONGO_ROOT_USER" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin)
+
+              wait_mongo() {
+                local host="$1"
+                until mongosh --quiet --host "$host" "${auth[@]}" --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)' >/dev/null 2>&1; do
+                  sleep 2
+                done
+              }
+
+              wait_mongo mongo-router
+              mongosh --quiet --host mongo-router "${auth[@]}" --eval '
+                const ids = db.getSiblingDB("config").shards.find({}, {_id:1}).toArray().map(s => s._id);
+                if (!ids.includes("shard-0")) {
+                  assert.commandWorked(db.adminCommand({
+                    addShard: "shard0-rs/mongo-shard-0-0.mongo-shard-0-headless:27017,mongo-shard-0-1.mongo-shard-0-headless:27017,mongo-shard-0-2.mongo-shard-0-headless:27017",
+                    name: "shard-0"
+                  }));
+                }
+                if (!ids.includes("shard-1")) {
+                  assert.commandWorked(db.adminCommand({
+                    addShard: "shard1-rs/mongo-shard-1-0.mongo-shard-1-headless:27017,mongo-shard-1-1.mongo-shard-1-headless:27017,mongo-shard-1-2.mongo-shard-1-headless:27017",
+                    name: "shard-1"
+                  }));
+                }
+                sh.enableSharding("bnpb");
+              '
+
+              # Aggregator creates the unique hazard_id index. Wait before enabling sharding.
+              until mongosh --quiet --host mongo-router "${auth[@]}" --eval '
+                const names=db.getSiblingDB("bnpb").hazard_events.getIndexes().map(i => i.name);
+                quit(names.includes("hazard_id_1") ? 0 : 1)
+              ' >/dev/null 2>&1; do
+                sleep 2
+              done
+
+              mongosh --quiet --host mongo-router "${auth[@]}" --eval '
+                const ns="bnpb.hazard_events";
+                const existing=db.getSiblingDB("config").collections.findOne({_id:ns});
+                if (!existing || !existing.key) sh.shardCollection(ns, {hazard_id:1}, true);
+                try { sh.splitAt(ns, {hazard_id:"HZ-8"}); } catch (e) { print(e.message); }
+                try { sh.moveChunk(ns, {hazard_id:"HZ-4"}, "shard-0"); } catch (e) { print(e.message); }
+                try { sh.moveChunk(ns, {hazard_id:"HZ-c"}, "shard-1"); } catch (e) { print(e.message); }
+              '
+          resources:
+            requests: { memory: 128Mi, cpu: 50m }
+            limits: { memory: 256Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo-router-only-from-owner
+spec:
+  podSelector:
+    matchLabels: { app: mongo-router }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { role: aggregator }
+        - podSelector:
+            matchLabels: { app: mongo-bootstrap }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo-data-only-from-owner-and-cluster
+spec:
+  podSelector:
+    matchLabels: { role: store }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { role: store }
+        - podSelector:
+            matchLabels: { app: mongo-router }
+        - podSelector:
+            matchLabels: { role: aggregator }
+      ports:
+        - { protocol: TCP, port: 27017 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: mongo-config }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: mongo-config } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: mongo-shard-0 }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: mongo-shard-0 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: mongo-shard-1 }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: mongo-shard-1 } }
