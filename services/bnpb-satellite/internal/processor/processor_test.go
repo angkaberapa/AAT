@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -214,6 +217,40 @@ func TestLowConfidenceAdvancesOffsetWithoutStoring(t *testing.T) {
 	offset, _ := db.Offset(ctx)
 	if offset != "9" {
 		t.Fatalf("offset = %q, want 9", offset)
+	}
+}
+
+func TestProcessorConsumesHTTPFeed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "id: 1\nevent: detection\ndata: {\"satellite\":\"N20\",\"acq_date\":\"2026-11-12\",\"acq_time\":\"0243\",\"latitude\":-2.51230,\"longitude\":113.80440,\"confidence\":\"h\",\"frp\":10}\n\n")
+		_, _ = fmt.Fprint(w, "id: 2\nevent: detection\ndata: {\"satellite\":\"N21\",\"acq_date\":\"2026-11-12\",\"acq_time\":\"0244\",\"latitude\":-2.51235,\"longitude\":113.80445,\"confidence\":\"h\",\"frp\":5}\n\n")
+	}))
+	defer server.Close()
+
+	stream, err := sse.NewClient(server.URL, "test-token")
+	if err != nil {
+		t.Fatalf("sse client: %v", err)
+	}
+	proc, db, ingestClient := testProcessor(t, stream)
+	echo := context.Background()
+	if err := proc.consume(echo); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	items, _ := db.PendingOutbox(echo, 10)
+	if len(items) != 1 {
+		t.Fatalf("outbox = %d, want one fire", len(items))
+	}
+	proc.flushOutbox(echo)
+	if len(ingestClient.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(ingestClient.upserts))
+	}
+	fires, _ := db.ActiveFireIDs(echo)
+	if len(fires) != 1 {
+		t.Fatalf("fires = %v", fires)
 	}
 }
 
