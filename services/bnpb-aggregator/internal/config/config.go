@@ -31,6 +31,7 @@ type Config struct {
 	MongoDB                    string
 	AuditToken                 string
 	CoastalIngestToken         string
+	SatelliteIngestToken       string
 	FieldReportIngestToken     string
 	FieldReportWorkerInterval  time.Duration
 	FieldReportLeaseDuration   time.Duration
@@ -84,6 +85,7 @@ func Load() (Config, error) {
 		KafkaBootstrapServers: e.String("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
 		KafkaHazardTopic:      e.String("KAFKA_HAZARD_TOPIC", "hazard-events"),
 	}
+	c.SatelliteIngestToken = e.String("SATELLITE_INGEST_TOKEN", c.CoastalIngestToken)
 	c.KafkaTopicPartitions = e.Int("KAFKA_TOPIC_PARTITIONS", 3)
 	e.Check(c.PVMBGCompatibilityVersion >= 1 && c.PVMBGCompatibilityVersion <= 5, "PVMBG_COMPATIBILITY_VERSION must be between 1 and 5")
 	retentionHours := e.Int("KAFKA_TOPIC_RETENTION_HOURS", 168)
