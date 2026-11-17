@@ -7,4 +7,5 @@ use (
 	./services/bnpb-coastal
 	./services/bnpb-consumer-dashboard
 	./services/bnpb-consumer-notifier
+	./services/bnpb-satellite
 )
