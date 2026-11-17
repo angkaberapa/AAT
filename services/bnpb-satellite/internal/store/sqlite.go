@@ -249,6 +249,31 @@ func (s *Store) ActiveDetections(ctx context.Context) ([]domain.Detection, error
 	return detections, rows.Err()
 }
 
+func (s *Store) Detection(ctx context.Context, key string) (*domain.Detection, error) {
+	var detection domain.Detection
+	var observed string
+	var frp sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT detection_key, satellite, acq_date, acq_time, latitude, longitude,
+		       confidence, frp, observed_at, active, raw_json
+		FROM detections WHERE detection_key = ?`, key).Scan(
+		&detection.Key, &detection.Satellite, &detection.AcqDate, &detection.AcqTime,
+		&detection.Latitude, &detection.Longitude, &detection.Confidence, &frp,
+		&observed, &detection.Active, &detection.RawJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get detection: %w", err)
+	}
+	if frp.Valid {
+		value := frp.Float64
+		detection.FRP = &value
+	}
+	detection.ObservedAt, _ = parseTime(observed)
+	return &detection, nil
+}
+
 func (s *Store) ActiveFireIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT fire_id FROM fires WHERE active = 1 ORDER BY fire_id`)
 	if err != nil {
