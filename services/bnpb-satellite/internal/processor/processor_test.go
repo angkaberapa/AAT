@@ -210,6 +210,9 @@ func TestLowConfidenceAdvancesOffsetWithoutStoring(t *testing.T) {
 	if err := proc.handle(ctx, event); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
+	if err := proc.flushBatch(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	count, _ := db.DetectionCount(ctx)
 	if count != 0 {
 		t.Fatalf("detections = %d, want 0", count)

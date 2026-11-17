@@ -48,7 +48,11 @@ type Processor struct {
 	config  Config
 	now     func() time.Time
 
-	latest time.Time
+	latest       time.Time
+	pending      []feed.Message
+	lastFlush    time.Time
+	batchSize    int
+	batchEvery   time.Duration
 }
 
 func New(logger *slog.Logger, stream Streamer, db *store.Store, ingestClient ingest.Client, config Config, recorder ...*metrics.Metrics) (*Processor, error) {
@@ -78,13 +82,15 @@ func New(logger *slog.Logger, stream Streamer, db *store.Store, ingestClient ing
 		rec = metrics.New()
 	}
 	return &Processor{
-		logger:  logger,
-		stream:  stream,
-		store:   db,
-		ingest:  ingestClient,
-		metrics: rec,
-		config:  config,
-		now:     time.Now,
+		logger:     logger,
+		stream:     stream,
+		store:      db,
+		ingest:     ingestClient,
+		metrics:    rec,
+		config:     config,
+		now:        time.Now,
+		batchSize:  200,
+		batchEvery: 250 * time.Millisecond,
 	}, nil
 }
 
@@ -129,51 +135,164 @@ func (p *Processor) consume(parent context.Context) error {
 		return err
 	}
 	p.logger.InfoContext(ctx, "connecting to feed", "from", offset)
-	return p.stream.Stream(ctx, offset, func(event sse.Event) error {
+	err = p.stream.Stream(ctx, offset, func(event sse.Event) error {
 		return p.handle(ctx, event)
 	})
+	if flushErr := p.flushBatch(ctx); flushErr != nil && err == nil {
+		err = flushErr
+	}
+	return err
 }
 
 func (p *Processor) handle(ctx context.Context, event sse.Event) error {
-	started := p.now()
 	message, err := feed.Parse(event.Type, event.ID, event.Data)
 	if err != nil {
 		if errors.Is(err, feed.ErrLowConfidence) {
 			p.metrics.IncEvent("detection", "skipped")
-			return p.commitOffset(ctx, message.Offset)
+		} else {
+			p.metrics.IncEvent(event.Type, "invalid")
+			p.logger.WarnContext(ctx, "invalid feed event",
+				"type", event.Type, "offset", message.Offset, "error", err.Error())
 		}
-		p.metrics.IncEvent(event.Type, "invalid")
-		p.logger.WarnContext(ctx, "invalid feed event",
-			"type", event.Type, "offset", message.Offset, "error", err.Error())
-		return p.commitOffset(ctx, message.Offset)
 	}
+	p.pending = append(p.pending, message)
+	if len(p.pending) >= p.batchSize || p.now().Sub(p.lastFlush) >= p.batchEvery {
+		return p.flushBatch(ctx)
+	}
+	return nil
+}
 
-	switch message.Kind {
-	case feed.KindHeartbeat:
-		p.metrics.IncEvent("heartbeat", "ok")
-		return p.commitOffset(ctx, message.Offset)
-	case feed.KindDetection, feed.KindUpdate:
-		if message.Kind == feed.KindUpdate && message.Detection.Key == "" {
-			if err := p.applyUpdate(ctx, message); err != nil {
-				p.metrics.IncEvent(message.Type, "error")
-				return err
-			}
-		} else if err := p.applyDetection(ctx, message); err != nil {
-			p.metrics.IncEvent(message.Type, "error")
-			return err
-		}
-		p.metrics.IncEvent(message.Type, "ok")
-	case feed.KindRetract:
-		if err := p.applyRetract(ctx, message); err != nil {
-			p.metrics.IncEvent("retract", "error")
-			return err
-		}
-		p.metrics.IncEvent("retract", "ok")
-	default:
-		p.metrics.IncEvent(message.Type, "ignored")
+// flushBatch applies every buffered frame in one transaction. Clustering runs
+// once per batch, so a 60x feed no longer pays a full recompute per event.
+func (p *Processor) flushBatch(ctx context.Context) error {
+	if len(p.pending) == 0 {
 		return nil
 	}
-	p.metrics.ObserveProcessing(p.now().Sub(started))
+	started := p.now()
+	batch := p.pending
+	p.pending = nil
+	p.lastFlush = started
+
+	active, err := p.store.ActiveDetections(ctx)
+	if err != nil {
+		return err
+	}
+	existing, err := p.store.ActiveFireIDs(ctx)
+	if err != nil {
+		return err
+	}
+	current := make(map[string]domain.Detection, len(active))
+	for _, detection := range active {
+		current[detection.Key] = detection
+	}
+	mutations := make(map[string]*domain.Detection)
+	offset := ""
+	late := 0
+	okTypes := map[string]int{}
+
+	for _, message := range batch {
+		if message.Offset != "" {
+			offset = message.Offset
+		}
+		switch message.Kind {
+		case feed.KindHeartbeat:
+			okTypes["heartbeat"]++
+		case feed.KindDetection, feed.KindUpdate:
+			detection := message.Detection
+			if message.Kind == feed.KindUpdate && detection.Key == "" {
+				found, ok := current[message.Key]
+				if !ok {
+					stored, err := p.store.Detection(ctx, message.Key)
+					if err != nil {
+						return err
+					}
+					if stored == nil {
+						okTypes["update"]++
+						continue
+					}
+					found = *stored
+				}
+				if message.Confidence != nil && feed.IsLowConfidence(*message.Confidence) {
+					delete(current, message.Key)
+					mutations[message.Key] = nil
+					okTypes["update"]++
+					continue
+				}
+				if message.Confidence != nil {
+					found.Confidence = *message.Confidence
+				}
+				if message.FRP != nil {
+					found.FRP = message.FRP
+				}
+				found.Active = true
+				detection = found
+			}
+			if detection.Key == "" {
+				continue
+			}
+			current[detection.Key] = detection
+			value := detection
+			mutations[detection.Key] = &value
+			okTypes[message.Type]++
+			if p.isLate(detection.ObservedAt) {
+				late++
+			}
+			p.advanceLatest(detection.ObservedAt)
+		case feed.KindRetract:
+			if message.Key != "" {
+				delete(current, message.Key)
+				mutations[message.Key] = nil
+			}
+			okTypes["retract"]++
+		}
+	}
+	if offset == "" {
+		if len(mutations) > 0 {
+			return fmt.Errorf("batch has changes but no offset")
+		}
+		return nil
+	}
+
+	activeList := make([]domain.Detection, 0, len(current))
+	for _, detection := range current {
+		activeList = append(activeList, detection)
+	}
+	result := wildfire.Cluster(activeList)
+	fires, deletes := wildfire.ReconcileResult(result, existing)
+
+	if err := p.store.WithTx(ctx, func(tx *sql.Tx) error {
+		for key, detection := range mutations {
+			if detection == nil {
+				if err := store.DeactivateDetectionTx(ctx, tx, key); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := store.UpsertDetectionTx(ctx, tx, *detection); err != nil {
+				return err
+			}
+		}
+		if err := p.writeProjection(ctx, tx, fires, deletes, offset); err != nil {
+			return err
+		}
+		return store.SetOffsetTx(ctx, tx, offset)
+	}); err != nil {
+		return err
+	}
+
+	for eventType, count := range okTypes {
+		for i := 0; i < count; i++ {
+			p.metrics.IncEvent(eventType, "ok")
+		}
+	}
+	if late > 0 {
+		p.metrics.IncLate()
+	}
+	p.metrics.SetProjection(len(result.Singles), len(result.Fires))
+	p.metrics.ObserveProcessing(p.now().Sub(started) / time.Duration(len(batch)))
+	p.logger.InfoContext(ctx, "batch applied",
+		"events", len(batch), "fires", len(result.Fires),
+		"deletes", len(deletes), "offset", offset)
 	return nil
 }
 
