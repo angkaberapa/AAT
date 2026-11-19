@@ -7,13 +7,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLUSTER="${CLUSTER:-bnpb}"
-SERVICES=(bmkg-mock pvmbg-mock bnpb-coastal bnpb-aggregator bnpb-auth bnpb-api bnpb-consumer-dashboard bnpb-consumer-notifier)
+SERVICES=(bmkg-mock pvmbg-mock bnpb-coastal bnpb-satellite bnpb-aggregator bnpb-auth bnpb-api bnpb-consumer-dashboard bnpb-consumer-notifier)
 
 if [[ -z "${SKIP_CLUSTER:-}" ]] && ! k3d cluster get "$CLUSTER" >/dev/null 2>&1; then
   # Port host sama dengan M1; diteruskan ke Service LoadBalancer lewat loadbalancer k3d.
   k3d cluster create "$CLUSTER" --agents 2 \
     -p "8080:8080@loadbalancer" -p "8081:8081@loadbalancer" -p "8082:8082@loadbalancer" \
-    -p "8090:8090@loadbalancer" -p "8091:8091@loadbalancer" -p "8092:8092@loadbalancer"
+    -p "8090:8090@loadbalancer" -p "8091:8091@loadbalancer" -p "8092:8092@loadbalancer" \
+    -p "3000:3000@loadbalancer" -p "9090:9090@loadbalancer" -p "16686:16686@loadbalancer"
 fi
 
 images=()

@@ -4,7 +4,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Connection reuse matters under load: Go's default transport keeps only 2 idle
@@ -30,7 +33,11 @@ func NewHTTPClient(logger *slog.Logger, timeout time.Duration) *HTTPClient {
 	transport.MaxIdleConns = maxIdleConns
 	transport.MaxIdleConnsPerHost = maxIdleConnsPerHost
 	return &HTTPClient{
-		client: &http.Client{Timeout: timeout, Transport: transport},
+		// otelhttp membuat span client dan menyisipkan header traceparent ke request keluar.
+		client: &http.Client{Timeout: timeout, Transport: otelhttp.NewTransport(transport,
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return "call " + r.Method + " " + r.URL.Host + r.URL.Path
+			}))},
 		logger: logger.With("component", "http.outbound"),
 	}
 }
@@ -66,11 +73,18 @@ func (c *HTTPClient) Do(req *http.Request, target string) (*http.Response, error
 
 	start := time.Now()
 	resp, err := c.client.Do(req)
+	elapsed := time.Since(start)
+	httpClientDuration.WithLabelValues(target).Observe(elapsed.Seconds())
+	if err != nil {
+		httpClientRequests.WithLabelValues(target, "error").Inc()
+	} else {
+		httpClientRequests.WithLabelValues(target, strconv.Itoa(resp.StatusCode)).Inc()
+	}
 	attrs := []any{
 		"target", target,
 		"method", req.Method,
 		"url", req.URL.String(),
-		"latency_ms", millis(time.Since(start)),
+		"latency_ms", millis(elapsed),
 	}
 	if err != nil {
 		c.logger.WarnContext(ctx, "outbound call failed", append(attrs, "error", err.Error())...)

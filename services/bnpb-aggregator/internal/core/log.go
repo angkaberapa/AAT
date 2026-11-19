@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NewLogger returns a JSON logger writing one line per event to stdout. Every line
@@ -31,6 +33,10 @@ type correlationHandler struct{ slog.Handler }
 
 func (h correlationHandler) Handle(ctx context.Context, r slog.Record) error {
 	r.AddAttrs(slog.String("correlation_id", CorrelationID(ctx)))
+	// trace_id menghubungkan baris log dengan trace di Jaeger (M2 observabilitas).
+	if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
+		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
+	}
 	return h.Handler.Handle(ctx, r)
 }
 

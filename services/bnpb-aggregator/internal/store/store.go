@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -15,6 +16,10 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
@@ -148,12 +153,43 @@ func migrateLegacyEventIndexes(ctx context.Context, events *mongo.Collection) er
 	return nil
 }
 
+// latencyMonitor mencatat latensi tiap perintah Mongo di log, dan (M2) membuat span tracing per
+// perintah supaya langkah storage terlihat di trace. Span ditutup lewat RequestID. Bagian span
+// ditulis dengan bantuan LLM (Claude).
 func latencyMonitor(logger *slog.Logger) *event.CommandMonitor {
+	tracer := otel.Tracer("bnpb-aggregator/mongo")
+	var spans sync.Map // RequestID -> trace.Span
+	end := func(requestID int64, err error) {
+		if v, ok := spans.LoadAndDelete(requestID); ok {
+			span := v.(trace.Span)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
+		}
+	}
 	return &event.CommandMonitor{
+		Started: func(ctx context.Context, e *event.CommandStartedEvent) {
+			// Hanya perintah yang punya induk trace (request / siklus poll), bukan heartbeat driver.
+			if !trace.SpanContextFromContext(ctx).IsValid() {
+				return
+			}
+			_, span := tracer.Start(ctx, "mongo "+e.CommandName,
+				trace.WithSpanKind(trace.SpanKindClient),
+				trace.WithAttributes(
+					attribute.String("db.system", "mongodb"),
+					attribute.String("db.name", e.DatabaseName),
+					attribute.String("db.operation", e.CommandName),
+				))
+			spans.Store(e.RequestID, span)
+		},
 		Succeeded: func(ctx context.Context, e *event.CommandSucceededEvent) {
+			end(e.RequestID, nil)
 			logger.InfoContext(ctx, "outbound call", "target", "mongo", "command", e.CommandName, "latency_ms", millis(e.Duration))
 		},
 		Failed: func(ctx context.Context, e *event.CommandFailedEvent) {
+			end(e.RequestID, e.Failure)
 			logger.WarnContext(ctx, "outbound call failed", "target", "mongo", "command", e.CommandName, "latency_ms", millis(e.Duration), "error", e.Failure.Error())
 		},
 	}

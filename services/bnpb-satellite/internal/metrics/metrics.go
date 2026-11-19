@@ -72,6 +72,14 @@ func New() *Metrics {
 	return m
 }
 
+// Gatherer = registry metrik pipeline, digabung ke GET /metrics milik core (M2 observabilitas).
+func (m *Metrics) Gatherer() prometheus.Gatherer {
+	if m == nil {
+		return nil
+	}
+	return m.registry
+}
+
 func (m *Metrics) Handler() http.Handler {
 	if m == nil {
 		return http.NotFoundHandler()

@@ -69,6 +69,7 @@ func main() {
 		recs, err := st.SourceStatuses(ctx)
 		return toIngestRecords(recs), err
 	}, polledSources, cfg.SourceStaleAfter, time.Second, logger)
+	registerMetrics(statuses)
 	api.Register(mux, logger, st, statuses, api.WithSnapshotLimits(cfg.SnapshotDefaultLimit, cfg.SnapshotMaxLimit))
 	location, err := audit.NewKubernetesLocator(st, cfg.PodNamespace)
 	if err != nil {
@@ -184,9 +185,14 @@ func (t *termRunner) run(leadCtx context.Context) {
 	}
 	logger := t.logger.With("epoch", epoch)
 	logger.InfoContext(ctx, "leader term started")
+	metricIsLeader.Set(1)
+	metricLeaderEpoch.Set(float64(epoch))
+	metricLeaderTerms.Inc()
+	defer metricIsLeader.Set(0)
 
 	stepDown := func(ctx context.Context, err error) {
 		logger.WarnContext(ctx, "write rejected by fencing token, stepping down", "error", err.Error())
+		metricFencedWrites.Inc()
 		endTerm()
 	}
 
@@ -214,6 +220,9 @@ func (t *termRunner) run(leadCtx context.Context) {
 				stepDown(ctx, err)
 			}
 			return err
+		}
+		for _, r := range []store.SaveResult{store.Inserted, store.Updated, store.Unchanged} {
+			metricEventsStored.WithLabelValues(string(r)).Add(float64(counts[r]))
 		}
 		logger.InfoContext(ctx, "events stored",
 			"inserted", counts[store.Inserted],

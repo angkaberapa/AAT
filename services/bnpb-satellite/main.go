@@ -62,7 +62,8 @@ func main() {
 	}
 
 	mux := core.NewMux(cfg.ServiceName)
-	mux.Handle("GET /metrics", recorder.Handler())
+	// /metrics disajikan core (metrik HTTP + runtime); registry pipeline ikut digabung di sana.
+	core.AddMetricsGatherer(recorder.Gatherer())
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		stats, err := db.Stats(r.Context())
 		if err != nil {

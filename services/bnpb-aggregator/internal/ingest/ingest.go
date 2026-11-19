@@ -7,6 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/core"
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
 )
@@ -62,6 +66,10 @@ func (p *poller) loop(ctx context.Context, interval time.Duration) {
 func (p *poller) cycle(parent context.Context) {
 	ctx := core.WithCorrelationID(parent, core.NewCorrelationID())
 	source := string(p.client.Source())
+	// M2: satu trace per siklus poll (fetch ke upstream -> simpan ke Mongo). Ditulis dengan bantuan LLM (Claude).
+	ctx, span := otel.Tracer("bnpb-aggregator/ingest").Start(ctx, "poll "+source,
+		trace.WithAttributes(attribute.String("source", source), attribute.String("correlation_id", core.CorrelationID(ctx))))
+	defer span.End()
 
 	events, err := p.client.Fetch(ctx, p.since)
 	if err != nil {

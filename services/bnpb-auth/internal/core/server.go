@@ -10,14 +10,21 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// NewMux returns a ServeMux with GET /health already registered.
+// NewMux returns a ServeMux with GET /health and GET /metrics already registered, and turns on
+// tracing for this service (see telemetry.go).
 func NewMux(service string) *http.ServeMux {
+	initTracing(service)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": service})
 	})
+	mux.Handle("GET /metrics", metricsHandler())
 	return mux
 }
 
@@ -32,8 +39,11 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // logging, until ctx is cancelled; then it shuts down gracefully.
 func Serve(ctx context.Context, logger *slog.Logger, port int, handler http.Handler) error {
 	srv := &http.Server{
-		Addr:              ":" + strconv.Itoa(port),
-		Handler:           withObservability(logger, handler),
+		Addr: ":" + strconv.Itoa(port),
+		// otelhttp membuat span server (melanjutkan traceparent dari pemanggil); probe & scrape
+		// tidak di-trace supaya tidak memenuhi Jaeger.
+		Handler: otelhttp.NewHandler(withObservability(logger, handler), "http.server",
+			otelhttp.WithFilter(func(r *http.Request) bool { return !isProbe(r.URL.Path) })),
 		ReadHeaderTimeout: 5 * time.Second,
 		// Tanpa ini koneksi keep-alive yang diam tidak pernah ditutup: tiap koneksi memegang
 		// goroutine + buffer, dan 10k client yang jarang memanggil (mis. ambil token) membuat pod
@@ -52,6 +62,7 @@ func Serve(ctx context.Context, logger *slog.Logger, port int, handler http.Hand
 	}
 
 	logger.Info("service stopping")
+	defer shutdownTracing()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -76,18 +87,40 @@ func withObservability(logger *slog.Logger, next http.Handler) http.Handler {
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
-		next.ServeHTTP(rec, r.WithContext(ctx))
+		req := r.WithContext(ctx)
+		probe := isProbe(r.URL.Path)
+		if !probe {
+			httpServerInFlight.Inc()
+		}
+		next.ServeHTTP(rec, req)
+		elapsed := time.Since(start)
 
-		if r.URL.Path == "/health" {
+		if probe {
 			return // probes are noisy
 		}
+		httpServerInFlight.Dec()
+		// ServeMux mengisi req.Pattern (mis. "GET /hazards/{id}"): label route berkardinalitas rendah.
+		route := req.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		httpServerRequests.WithLabelValues(r.Method, route, strconv.Itoa(rec.status)).Inc()
+		httpServerDuration.WithLabelValues(r.Method, route).Observe(elapsed.Seconds())
+		span := trace.SpanFromContext(ctx)
+		span.SetName(route)
+		span.SetAttributes(attribute.String("correlation_id", id))
+
 		logger.InfoContext(ctx, "request handled",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
-			"latency_ms", millis(time.Since(start)),
+			"latency_ms", millis(elapsed),
 		)
 	})
+}
+
+func isProbe(path string) bool {
+	return path == "/health" || path == "/metrics"
 }
 
 type statusRecorder struct {
