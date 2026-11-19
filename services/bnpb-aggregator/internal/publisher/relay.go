@@ -11,6 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"log/slog"
 	"time"
 
@@ -39,6 +43,7 @@ type Record struct {
 	Key           string
 	Value         []byte
 	CorrelationID string // from the poll cycle that produced this version
+	TraceParent   string // M2: span "kafka publish" (anak dari trace yang menyimpan versi ini)
 }
 
 type Outbox interface {
@@ -122,21 +127,38 @@ func (r *Relay) PublishOnce(parent context.Context) (int, error) {
 	}
 
 	records := make([]Record, 0, len(entries))
+	// M2 (dibantu LLM, Claude): satu span "kafka publish" per event, melanjutkan trace yang
+	// menyimpannya (siklus poll / ingest internal). Konteks span ini yang dikirim ke consumer.
+	spans := make([]trace.Span, 0, len(entries))
 	for _, entry := range entries {
 		value, err := json.Marshal(newMessage(entry, r.now()))
 		if err != nil {
+			endSpans(spans, err)
 			return 0, fmt.Errorf("encode %s: %w", entry.Event.HazardID, err)
 		}
+		spanCtx, span := otel.Tracer("bnpb-aggregator/outbox").Start(
+			core.ContextWithTraceParent(ctx, entry.TraceParent), "kafka publish",
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("hazard_id", entry.Event.HazardID),
+				attribute.Int("outbox.version", entry.Version),
+				attribute.String("correlation_id", entry.CorrelationID),
+			))
+		spans = append(spans, span)
 		records = append(records, Record{
 			Key:           entry.Event.HazardID,
 			Value:         value,
 			CorrelationID: entry.CorrelationID,
+			TraceParent:   core.TraceParent(spanCtx),
 		})
 	}
 
 	publishCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	if err := r.producer.Publish(publishCtx, records); err != nil {
+	err = r.producer.Publish(publishCtx, records)
+	endSpans(spans, err)
+	if err != nil {
 		return 0, err
 	}
 
@@ -148,6 +170,16 @@ func (r *Relay) PublishOnce(parent context.Context) (int, error) {
 	}
 	r.logger.InfoContext(ctx, "events published", "count", len(entries))
 	return len(entries), nil
+}
+
+func endSpans(spans []trace.Span, err error) {
+	for _, span := range spans {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}
 }
 
 func newMessage(entry store.OutboxEntry, now time.Time) Message {

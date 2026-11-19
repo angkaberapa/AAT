@@ -14,6 +14,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -94,6 +96,54 @@ func (allGatherers) Gather() ([]*dto.MetricFamily, error) {
 
 func metricsHandler() http.Handler {
 	return promhttp.HandlerFor(allGatherers{}, promhttp.HandlerOpts{})
+}
+
+// InstrumentTransport membungkus RoundTripper dengan span OpenTelemetry (header traceparent ikut
+// terkirim) dan metrik http_client_* berlabel target. Untuk HTTP client yang tidak memakai
+// core.HTTPClient, mis. client ingest satellite/coastal. rt nil = http.DefaultTransport.
+func InstrumentTransport(target string, rt http.RoundTripper) http.RoundTripper {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return clientMetricsTransport{target: target, next: otelhttp.NewTransport(rt,
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return "call " + r.Method + " " + r.URL.Host + r.URL.Path
+		}))}
+}
+
+type clientMetricsTransport struct {
+	target string
+	next   http.RoundTripper
+}
+
+func (t clientMetricsTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	start := time.Now()
+	resp, err := t.next.RoundTrip(r)
+	httpClientDuration.WithLabelValues(t.target).Observe(time.Since(start).Seconds())
+	code := "error"
+	if err == nil {
+		code = strconv.Itoa(resp.StatusCode)
+	}
+	httpClientRequests.WithLabelValues(t.target, code).Inc()
+	return resp, err
+}
+
+// TraceParentHeader = header W3C pembawa konteks trace (HTTP otomatis lewat otelhttp; Kafka manual).
+const TraceParentHeader = "traceparent"
+
+// TraceParent mengembalikan header traceparent untuk span aktif di ctx ("" bila tidak ada).
+func TraceParent(ctx context.Context) string {
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	return carrier.Get(TraceParentHeader)
+}
+
+// ContextWithTraceParent melanjutkan trace dari nilai header traceparent (mis. dari pesan Kafka).
+func ContextWithTraceParent(ctx context.Context, traceParent string) context.Context {
+	if traceParent == "" {
+		return ctx
+	}
+	return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{TraceParentHeader: traceParent})
 }
 
 var (

@@ -593,7 +593,7 @@
   },
   {
    "type": "row",
-   "title": "P2 - Aggregator (leader election & fencing)",
+   "title": "SLO jalur peringatan Tim Lapangan (target: 99% alert terkirim <= 5 s sejak kejadian)",
    "id": 13,
    "collapsed": false,
    "gridPos": {
@@ -606,29 +606,37 @@
   },
   {
    "type": "stat",
-   "title": "Instance aggregator hidup",
+   "title": "SLI: alert <= 5 s (rentang dashboard)",
    "id": 14,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "",
+   "description": "Persentase notifikasi Tim Lapangan yang terkirim <= 5 s sejak occurred_at, selama rentang waktu dashboard.",
    "gridPos": {
     "h": 5,
-    "w": 4,
+    "w": 6,
     "x": 0,
     "y": 35
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percent",
      "mappings": [],
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "green",
+        "color": "red",
         "value": null
+       },
+       {
+        "color": "orange",
+        "value": 95
+       },
+       {
+        "color": "green",
+        "value": 99
        }
       ]
      }
@@ -653,8 +661,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "count(up{service=\"bnpb-aggregator\"} == 1)",
-     "legendFormat": "instance",
+     "expr": "100 * sum(increase(bnpb_alert_delivery_seconds_bucket{le=\"5\"}[$__range])) / clamp_min(sum(increase(bnpb_alert_delivery_seconds_count[$__range])), 1e-9)",
+     "legendFormat": "SLI",
      "refId": "A",
      "instant": true
     }
@@ -662,22 +670,22 @@
   },
   {
    "type": "stat",
-   "title": "Leader sekarang",
+   "title": "Error budget terpakai",
    "id": 15,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
-   "description": "Pod yang memegang Lease bnpb-aggregator-ingest (satu-satunya yang polling).",
+   "description": "Budget = 1% alert boleh > 5 s. 100% berarti budget habis selama rentang dashboard (P5 kriteria 8).",
    "gridPos": {
     "h": 5,
-    "w": 8,
-    "x": 4,
+    "w": 6,
+    "x": 6,
     "y": 35
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percent",
      "mappings": [],
      "thresholds": {
       "mode": "absolute",
@@ -685,6 +693,14 @@
        {
         "color": "green",
         "value": null
+       },
+       {
+        "color": "orange",
+        "value": 50
+       },
+       {
+        "color": "red",
+        "value": 100
        }
       ]
      }
@@ -709,8 +725,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (pod) (bnpb_aggregator_is_leader) == 1",
-     "legendFormat": "{{pod}}",
+     "expr": "100 * (1 - sum(increase(bnpb_alert_delivery_seconds_bucket{le=\"5\"}[$__range])) / clamp_min(sum(increase(bnpb_alert_delivery_seconds_count[$__range])), 1e-9)) / (1 - 0.99)",
+     "legendFormat": "terpakai",
      "refId": "A",
      "instant": true
     }
@@ -718,7 +734,7 @@
   },
   {
    "type": "stat",
-   "title": "Epoch (fencing token)",
+   "title": "Alert terkirim (rentang dashboard)",
    "id": 16,
    "datasource": {
     "type": "prometheus",
@@ -765,6 +781,429 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
+     "expr": "sum(increase(bnpb_alerts_sent_total[$__range]))",
+     "legendFormat": "alert",
+     "refId": "A",
+     "instant": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Latensi alert p95 per jenis bahaya",
+   "id": 17,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "",
+   "gridPos": {
+    "h": 5,
+    "w": 8,
+    "x": 16,
+    "y": 35
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (hazard_type, le) (rate(bnpb_alert_delivery_seconds_bucket[5m])))",
+     "legendFormat": "{{hazard_type}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Consumer Kafka",
+   "id": 18,
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 40
+   },
+   "panels": []
+  },
+  {
+   "type": "timeseries",
+   "title": "Record diproses (record/s)",
+   "id": 19,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "Throughput & error consumer (bukan HTTP).",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 41
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (group, result) (rate(kafka_consumer_records_total[1m]))",
+     "legendFormat": "{{group}} {{result}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Umur event saat diproses p95 (publish -> selesai)",
+   "id": 20,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "Naik saat consumer tertinggal / mati lalu menyusul.",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 41
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (group, le) (rate(kafka_consumer_event_age_seconds_bucket[1m])))",
+     "legendFormat": "{{group}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Lama proses p95 & commit gagal",
+   "id": 21,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 41
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (group, le) (rate(kafka_consumer_processing_seconds_bucket[1m])))",
+     "legendFormat": "proses p95 {{group}}",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (group) (rate(kafka_consumer_commits_total{result=\"error\"}[1m]))",
+     "legendFormat": "commit gagal/s {{group}}",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "P2 - Aggregator (leader election & fencing)",
+   "id": 22,
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 49
+   },
+   "panels": []
+  },
+  {
+   "type": "stat",
+   "title": "Instance aggregator hidup",
+   "id": 23,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "",
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 50
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value_and_name"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(up{service=\"bnpb-aggregator\"} == 1)",
+     "legendFormat": "instance",
+     "refId": "A",
+     "instant": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Leader sekarang",
+   "id": 24,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "Pod yang memegang Lease bnpb-aggregator-ingest (satu-satunya yang polling).",
+   "gridPos": {
+    "h": 5,
+    "w": 8,
+    "x": 4,
+    "y": 50
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value_and_name"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (pod) (bnpb_aggregator_is_leader) == 1",
+     "legendFormat": "{{pod}}",
+     "refId": "A",
+     "instant": true
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Epoch (fencing token)",
+   "id": 25,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "description": "",
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 50
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value_and_name"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
      "expr": "max(bnpb_aggregator_leader_epoch)",
      "legendFormat": "epoch",
      "refId": "A",
@@ -775,7 +1214,7 @@
   {
    "type": "stat",
    "title": "Tulisan ditolak fencing (1 jam)",
-   "id": 17,
+   "id": 26,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -785,7 +1224,7 @@
     "h": 5,
     "w": 4,
     "x": 16,
-    "y": 35
+    "y": 50
    },
    "fieldConfig": {
     "defaults": {
@@ -835,7 +1274,7 @@
   {
    "type": "stat",
    "title": "Pergantian leader (1 jam)",
-   "id": 18,
+   "id": 27,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -845,7 +1284,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 35
+    "y": 50
    },
    "fieldConfig": {
     "defaults": {
@@ -891,7 +1330,7 @@
   {
    "type": "timeseries",
    "title": "Leader per pod",
-   "id": 19,
+   "id": 28,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -901,7 +1340,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 40
+    "y": 55
    },
    "fieldConfig": {
     "defaults": {
@@ -946,7 +1385,7 @@
   {
    "type": "timeseries",
    "title": "HazardEvent hasil poll (event/s)",
-   "id": 20,
+   "id": 29,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -956,7 +1395,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 40
+    "y": 55
    },
    "fieldConfig": {
     "defaults": {
@@ -1001,7 +1440,7 @@
   {
    "type": "timeseries",
    "title": "Status sumber",
-   "id": 21,
+   "id": 30,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1011,7 +1450,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 40
+    "y": 55
    },
    "fieldConfig": {
     "defaults": {
@@ -1056,20 +1495,20 @@
   {
    "type": "row",
    "title": "P4 - Feed Satelit",
-   "id": 22,
+   "id": 31,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 48
+    "y": 63
    },
    "panels": []
   },
   {
    "type": "timeseries",
    "title": "Keterlambatan ingest (s)",
-   "id": 23,
+   "id": 32,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1079,7 +1518,7 @@
     "h": 8,
     "w": 6,
     "x": 0,
-    "y": 49
+    "y": 64
    },
    "fieldConfig": {
     "defaults": {
@@ -1124,7 +1563,7 @@
   {
    "type": "timeseries",
    "title": "Event feed (event/s)",
-   "id": 24,
+   "id": 33,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1134,7 +1573,7 @@
     "h": 8,
     "w": 6,
     "x": 6,
-    "y": 49
+    "y": 64
    },
    "fieldConfig": {
     "defaults": {
@@ -1179,7 +1618,7 @@
   {
    "type": "timeseries",
    "title": "Kebakaran aktif & deteksi tunggal",
-   "id": 25,
+   "id": 34,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1189,7 +1628,7 @@
     "h": 8,
     "w": 6,
     "x": 12,
-    "y": 49
+    "y": 64
    },
    "fieldConfig": {
     "defaults": {
@@ -1243,7 +1682,7 @@
   {
    "type": "timeseries",
    "title": "Outbox ingest & deteksi terlambat",
-   "id": 26,
+   "id": 35,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1253,7 +1692,7 @@
     "h": 8,
     "w": 6,
     "x": 18,
-    "y": 49
+    "y": 64
    },
    "fieldConfig": {
     "defaults": {
@@ -1316,20 +1755,20 @@
   {
    "type": "row",
    "title": "P5 - Sensor Pantai",
-   "id": 27,
+   "id": 36,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 57
+    "y": 72
    },
    "panels": []
   },
   {
    "type": "stat",
    "title": "Circuit breaker",
-   "id": 28,
+   "id": 37,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1339,7 +1778,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 58
+    "y": 73
    },
    "fieldConfig": {
     "defaults": {
@@ -1403,7 +1842,7 @@
   {
    "type": "timeseries",
    "title": "Permintaan ke Sensor Pantai",
-   "id": 29,
+   "id": 38,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1413,7 +1852,7 @@
     "h": 8,
     "w": 6,
     "x": 6,
-    "y": 58
+    "y": 73
    },
    "fieldConfig": {
     "defaults": {
@@ -1458,7 +1897,7 @@
   {
    "type": "timeseries",
    "title": "Latensi event kritis p95",
-   "id": 30,
+   "id": 39,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1468,7 +1907,7 @@
     "h": 8,
     "w": 6,
     "x": 12,
-    "y": 58
+    "y": 73
    },
    "fieldConfig": {
     "defaults": {
@@ -1513,7 +1952,7 @@
   {
    "type": "timeseries",
    "title": "Umur cache, karantina, outbox",
-   "id": 31,
+   "id": 40,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1523,7 +1962,7 @@
     "h": 8,
     "w": 6,
     "x": 18,
-    "y": 58
+    "y": 73
    },
    "fieldConfig": {
     "defaults": {
@@ -1595,20 +2034,20 @@
   {
    "type": "row",
    "title": "Runtime",
-   "id": 32,
+   "id": 41,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 66
+    "y": 81
    },
    "panels": []
   },
   {
    "type": "timeseries",
    "title": "Memori (RSS) per pod",
-   "id": 33,
+   "id": 42,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1618,7 +2057,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 67
+    "y": 82
    },
    "fieldConfig": {
     "defaults": {
@@ -1663,7 +2102,7 @@
   {
    "type": "timeseries",
    "title": "Target scrape hidup",
-   "id": 34,
+   "id": 43,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1673,7 +2112,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 67
+    "y": 82
    },
    "fieldConfig": {
     "defaults": {

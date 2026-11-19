@@ -37,7 +37,8 @@ func NewHTTPClient(baseURL, token string, timeout time.Duration) (*HTTPClient, e
 	return &HTTPClient{
 		baseURL: parsed,
 		token:   token,
-		http:    &http.Client{Timeout: timeout},
+		// M2 observabilitas: span + metrik panggilan keluar (dibantu LLM, Claude).
+		http: &http.Client{Timeout: timeout, Transport: core.InstrumentTransport("sensor-pantai", nil)},
 	}, nil
 }
 

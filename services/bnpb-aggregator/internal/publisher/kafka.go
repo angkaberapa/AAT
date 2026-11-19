@@ -47,10 +47,14 @@ func NewKafkaProducer(bootstrap, topic string, logger *slog.Logger) (*KafkaProdu
 func (p *KafkaProducer) Publish(ctx context.Context, records []Record) error {
 	krecords := make([]*kgo.Record, 0, len(records))
 	for _, r := range records {
+		headers := []kgo.RecordHeader{{Key: core.CorrelationHeader, Value: []byte(r.CorrelationID)}}
+		if r.TraceParent != "" {
+			headers = append(headers, kgo.RecordHeader{Key: core.TraceParentHeader, Value: []byte(r.TraceParent)})
+		}
 		krecords = append(krecords, &kgo.Record{
 			Key:     []byte(r.Key),
 			Value:   r.Value,
-			Headers: []kgo.RecordHeader{{Key: core.CorrelationHeader, Value: []byte(r.CorrelationID)}},
+			Headers: headers,
 		})
 	}
 
