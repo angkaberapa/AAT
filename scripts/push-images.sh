@@ -22,7 +22,7 @@ SERVICES=(bmkg-mock pvmbg-mock bnpb-aggregator bnpb-api bnpb-auth bnpb-consumer-
 
 if [[ -z "${TAG:-}" ]]; then
   TAG="$(git -C "$ROOT" rev-parse --short HEAD)"
-  if [[ -n "$(git -C "$ROOT" status --porcelain -- services)" ]]; then
+  if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no -- services)" ]]; then
     echo "error: ada perubahan belum di-commit di services/; commit dulu atau set TAG=... secara eksplisit" >&2
     exit 1
   fi

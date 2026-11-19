@@ -51,3 +51,34 @@ patches:
           - { key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule }
   - target: { kind: Deployment, name: "^(bnpb-consumer-dashboard|bnpb-consumer-notifier|bnpb-satellite|bnpb-coastal|sensor-pantai)$" }
     patch: *pinControlPlane
+
+# >>> images (scripts/push-images.sh)
+images:
+  - name: aat/bmkg-mock
+    newName: ghcr.io/angkaberapa/aat-bmkg-mock
+    newTag: "5a5d731"
+  - name: aat/pvmbg-mock
+    newName: ghcr.io/angkaberapa/aat-pvmbg-mock
+    newTag: "5a5d731"
+  - name: aat/bnpb-aggregator
+    newName: ghcr.io/angkaberapa/aat-bnpb-aggregator
+    newTag: "5a5d731"
+  - name: aat/bnpb-api
+    newName: ghcr.io/angkaberapa/aat-bnpb-api
+    newTag: "5a5d731"
+  - name: aat/bnpb-auth
+    newName: ghcr.io/angkaberapa/aat-bnpb-auth
+    newTag: "5a5d731"
+  - name: aat/bnpb-consumer-dashboard
+    newName: ghcr.io/angkaberapa/aat-bnpb-consumer-dashboard
+    newTag: "5a5d731"
+  - name: aat/bnpb-consumer-notifier
+    newName: ghcr.io/angkaberapa/aat-bnpb-consumer-notifier
+    newTag: "5a5d731"
+  - name: aat/bnpb-coastal
+    newName: ghcr.io/angkaberapa/aat-bnpb-coastal
+    newTag: "5a5d731"
+  - name: aat/bnpb-satellite
+    newName: ghcr.io/angkaberapa/aat-bnpb-satellite
+    newTag: "5a5d731"
+# <<< images
