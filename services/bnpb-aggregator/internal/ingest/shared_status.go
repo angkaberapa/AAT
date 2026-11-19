@@ -68,17 +68,27 @@ func (s *SharedStatus) Status(source domain.Source) SourceStatus {
 	return Describe(r, s.staleAfter, s.now().UTC())
 }
 
+// Snapshot = sumber yang di-poll (selalu ada, "unknown" bila belum tercatat) ditambah sumber yang
+// melaporkan statusnya sendiri lewat /internal/ingest/source-status (mis. SENSOR_PANTAI), hanya
+// bila sudah pernah melapor, supaya sumber yang belum berjalan tidak membuat semua respons stale.
 func (s *SharedStatus) Snapshot() []SourceStatus {
 	recs := s.records()
 	now := s.now().UTC()
 	out := make([]SourceStatus, 0, len(s.sources))
+	listed := make(map[domain.Source]bool, len(s.sources))
 	for _, src := range s.sources {
+		listed[src] = true
 		r, ok := recs[src]
 		if !ok {
 			out = append(out, SourceStatus{Source: src, Status: StatusUnknown})
 			continue
 		}
 		out = append(out, Describe(r, s.staleAfter, now))
+	}
+	for _, src := range domain.Sources {
+		if r, ok := recs[src]; ok && !listed[src] {
+			out = append(out, Describe(r, s.staleAfter, now))
+		}
 	}
 	return out
 }

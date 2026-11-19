@@ -80,6 +80,7 @@ func main() {
 	catalog.Register(mux, logger, mapper, st, cfg.AuditToken)
 	quarantine.RegisterUnprocessedIngest(mux, logger, st, cfg.CoastalIngestToken)
 	ingestapi.RegisterHazards(mux, logger, st, cfg.CoastalIngestToken, cfg.SatelliteIngestToken)
+	ingestapi.RegisterSourceStatus(mux, logger, st, cfg.CoastalIngestToken, cfg.SatelliteIngestToken)
 	fieldreports.Register(mux, logger, st, cfg.FieldReportIngestToken, cfg.AuditToken)
 	quarantine.RegisterReplay(mux, logger, st, mapper, cfg.AuditToken, cfg.InstanceID+"-manual-replay", cfg.PVMBGCompatibilityVersion)
 	fieldWorkerDone := make(chan struct{})
