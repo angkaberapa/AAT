@@ -102,7 +102,7 @@ func Load() (Config, error) {
 	c.SourceStaleAfter = e.Seconds("SOURCE_STALE_AFTER_SECONDS", 3*c.PollInterval+c.UpstreamTimeout)
 	c.FieldReportWorkerInterval = e.Millis("FIELD_REPORT_WORKER_INTERVAL_MS", 250*time.Millisecond)
 	c.FieldReportLeaseDuration = e.Seconds("FIELD_REPORT_LEASE_SECONDS", 30*time.Second)
-	c.FieldReportProcessingDelay = e.Millis("FIELD_REPORT_PROCESSING_DELAY_MS", 0)
+	c.FieldReportProcessingDelay = time.Duration(e.Int("FIELD_REPORT_PROCESSING_DELAY_MS", 0)) * time.Millisecond
 	e.Check(c.FieldReportWorkerInterval > 0, "FIELD_REPORT_WORKER_INTERVAL_MS must be positive")
 	e.Check(c.FieldReportLeaseDuration > c.FieldReportWorkerInterval, "FIELD_REPORT_LEASE_SECONDS must exceed worker interval")
 	e.Check(c.FieldReportProcessingDelay >= 0, "FIELD_REPORT_PROCESSING_DELAY_MS must not be negative")
