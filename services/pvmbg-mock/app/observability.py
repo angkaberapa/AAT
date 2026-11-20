@@ -107,6 +107,8 @@ async def observe_request(request: Request, call_next: Any) -> Response:
             path=request.url.path,
             status=response.status_code,
             latency_ms=round((perf_counter() - started_at) * 1000, 3),
+            # P2 M2: instance aggregator pemanggil, bukti hanya leader yang polling.
+            caller_instance=request.headers.get("x-instance-id"),
         )
         return response
     finally:
