@@ -49,13 +49,14 @@ type Processor struct {
 	config  Config
 	now     func() time.Time
 
-	latest       time.Time
-	mu           sync.Mutex
-	flushMu      sync.Mutex
-	pending      []feed.Message
-	lastFlush    time.Time
-	batchSize    int
-	batchEvery   time.Duration
+	latest     time.Time
+	mu         sync.Mutex
+	flushMu    sync.Mutex
+	pending    []feed.Message
+	lastFlush  time.Time
+	batchSize  int
+	batchEvery time.Duration
+	feed       streamState // dilindungi mu; dipakai laporan status (status.go)
 }
 
 func New(logger *slog.Logger, stream Streamer, db *store.Store, ingestClient ingest.Client, config Config, recorder ...*metrics.Metrics) (*Processor, error) {
@@ -108,6 +109,7 @@ func (p *Processor) Run(ctx context.Context) {
 
 	go p.flushLoop(ctx)
 	go p.batchLoop(ctx)
+	go p.statusLoop(ctx)
 
 	attempt := 0
 	for {
@@ -124,6 +126,7 @@ func (p *Processor) Run(ctx context.Context) {
 		if err != nil {
 			p.logger.WarnContext(ctx, "satellite stream ended", "error", err.Error(), "attempt", attempt+1)
 		}
+		p.markStreamEnded(err)
 		delay := reconnectDelay(attempt, p.config.ReconnectMin, p.config.ReconnectMax)
 		attempt++
 		if !sleep(ctx, delay) {
@@ -149,6 +152,7 @@ func (p *Processor) consume(parent context.Context) error {
 }
 
 func (p *Processor) handle(ctx context.Context, event sse.Event) error {
+	p.markFeedEvent()
 	message, err := feed.Parse(event.Type, event.ID, event.Data)
 	if err != nil {
 		if errors.Is(err, feed.ErrLowConfidence) {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/angkaberapa/AAT/services/bnpb-aggregator/internal/domain"
@@ -116,6 +117,33 @@ func (s *Store) SaveSourceStatus(ctx context.Context, epoch int64, rec SourceSta
 			bson.D{{Key: "_id", Value: rec.Source}}, rec, options.Replace().SetUpsert(true))
 		return err
 	})
+}
+
+// ReportSourceStatus menyimpan status sumber yang dilaporkan producer internal (coastal,
+// satellite) lewat POST /internal/ingest/source-status. Tidak ter-fence: sumber ini tidak di-poll
+// leader, dan tiap sumber hanya punya satu pelapor. Aturan sama dengan status poll: sehat ->
+// last_success, gagal -> last_error + failing_since (dipertahankan sampai sehat lagi).
+func (s *Store) ReportSourceStatus(ctx context.Context, source domain.Source, healthy bool, reason string, at time.Time) error {
+	rec := SourceStatusRecord{Source: source}
+	err := s.statuses.FindOne(ctx, bson.D{{Key: "_id", Value: source}}).Decode(&rec)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return fmt.Errorf("read source status %s: %w", source, err)
+	}
+	if healthy {
+		rec.LastSuccess = at
+		rec.FailingSince = time.Time{}
+	} else {
+		rec.LastError = at
+		rec.LastErrorMsg = reason
+		if rec.FailingSince.IsZero() {
+			rec.FailingSince = at
+		}
+	}
+	_, err = s.statuses.ReplaceOne(ctx, bson.D{{Key: "_id", Value: source}}, rec, options.Replace().SetUpsert(true))
+	if err != nil {
+		return fmt.Errorf("save source status %s: %w", source, err)
+	}
+	return nil
 }
 
 // SourceStatuses membaca status semua sumber yang pernah dicatat.

@@ -12,3 +12,26 @@ resources:
   - aggregator.yaml
   - api.yaml
   - consumers.yaml
+  - observability.yaml
+
+# Dashboard Grafana disimpan sebagai file JSON biasa supaya mudah diedit/diekspor ulang.
+configMapGenerator:
+  - name: grafana-dashboards
+    files:
+      - bnpb.json=grafana/bnpb.json
+    options:
+      disableNameSuffixHash: true
+      labels: { app: grafana, role: other }
+
+# Observabilitas M2 untuk semua service BNPB (Go): Prometheus men-scrape GET /metrics dan trace
+# dikirim ke Jaeger lewat ConfigMap otel-config. Satu patch untuk semua Deployment bnpb-*, supaya
+# service baru otomatis ikut.
+patches:
+  - target: { kind: Deployment, name: "bnpb-.*" }
+    patch: |-
+      - op: add
+        path: /spec/template/metadata/annotations
+        value: { prometheus.io/scrape: "true" }
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: { configMapRef: { name: otel-config } }

@@ -11,6 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"log/slog"
 	"strings"
 	"time"
@@ -90,15 +94,33 @@ func Run(ctx context.Context, logger *slog.Logger, cfg Config, handler Handler) 
 				return // shutting down: leave the rest uncommitted, it is redelivered later
 			}
 			recordCtx := core.WithCorrelationID(ctx, correlationID(record))
+			// M2: lanjutkan trace dari header traceparent (span "kafka publish" di aggregator).
+			recordCtx, span := otel.Tracer("kafka.consumer").Start(
+				core.ContextWithTraceParent(recordCtx, headerValue(record, core.TraceParentHeader)),
+				"kafka consume "+cfg.Group,
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "kafka"),
+					attribute.String("messaging.destination", record.Topic),
+					attribute.String("messaging.consumer.group", cfg.Group),
+					attribute.Int("messaging.kafka.partition", int(record.Partition)),
+					attribute.Int64("messaging.kafka.offset", record.Offset),
+					attribute.String("correlation_id", core.CorrelationID(recordCtx)),
+				))
+			defer span.End()
+			started := time.Now()
 			var msg Message
 			if err := json.Unmarshal(record.Value, &msg); err != nil || msg.Hazard.HazardID == "" {
 				// A record that can never be decoded would block the partition forever;
 				// log it and move on.
 				log.ErrorContext(recordCtx, "skipping undecodable record",
 					"partition", record.Partition, "offset", record.Offset)
+				metricRecords.WithLabelValues(cfg.Group, "undecodable").Inc()
+				span.SetStatus(codes.Error, "undecodable record")
 				handled = append(handled, record)
 				return
 			}
+			span.SetAttributes(attribute.String("hazard_id", msg.Hazard.HazardID))
 			if cfg.ProcessingDelay > 0 {
 				select {
 				case <-time.After(cfg.ProcessingDelay):
@@ -106,8 +128,17 @@ func Run(ctx context.Context, logger *slog.Logger, cfg Config, handler Handler) 
 					return // do not block shutdown; the record is not committed
 				}
 			}
+			result := "ok"
 			if err := handler.Handle(recordCtx, msg); err != nil {
 				log.ErrorContext(recordCtx, "handle failed", "event_id", msg.EventID, "error", err.Error())
+				result = "error"
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			metricRecords.WithLabelValues(cfg.Group, result).Inc()
+			metricProcessing.WithLabelValues(cfg.Group).Observe(time.Since(started).Seconds())
+			if !record.Timestamp.IsZero() {
+				metricEventAge.WithLabelValues(cfg.Group).Observe(time.Since(record.Timestamp).Seconds())
 			}
 			handled = append(handled, record)
 		})
@@ -126,11 +157,22 @@ func Run(ctx context.Context, logger *slog.Logger, cfg Config, handler Handler) 
 		start := time.Now()
 		if err := client.CommitRecords(ctx, handled...); err != nil {
 			log.WarnContext(ctx, "commit failed, records will be redelivered", "error", err.Error())
+			metricCommits.WithLabelValues(cfg.Group, "error").Inc()
 			continue
 		}
+		metricCommits.WithLabelValues(cfg.Group, "ok").Inc()
 		log.InfoContext(ctx, "outbound call", "target", "kafka", "op", "commit",
 			"records", len(handled), "latency_ms", float64(time.Since(start).Microseconds())/1000)
 	}
+}
+
+func headerValue(record *kgo.Record, key string) string {
+	for _, h := range record.Headers {
+		if strings.EqualFold(h.Key, key) {
+			return string(h.Value)
+		}
+	}
+	return ""
 }
 
 // correlationID continues the trace started by the poll cycle that produced the event.

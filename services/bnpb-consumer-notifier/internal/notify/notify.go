@@ -93,6 +93,10 @@ func (n *Notifier) Handle(ctx context.Context, msg consumer.Message) error {
 			n.state.Recent = n.state.Recent[:keepRecent]
 		}
 		n.state.Sent++
+		metricAlertsSent.WithLabelValues(h.HazardType, h.Severity).Inc()
+		if !h.OccurredAt.IsZero() && !note.SentAt.Before(h.OccurredAt) {
+			metricAlertDelivery.WithLabelValues(h.HazardType).Observe(note.SentAt.Sub(h.OccurredAt).Seconds())
+		}
 		next.NotifiedSeverity = h.Severity
 		n.logger.InfoContext(ctx, "notification sent",
 			"channel", "tim-lapangan", "event_id", msg.EventID,

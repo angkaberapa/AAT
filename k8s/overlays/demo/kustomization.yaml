@@ -19,8 +19,66 @@ patches:
       kind: Service
       metadata:
         name: mongo
+  # MONGO_URI diganti berdasarkan NAMA variabel (strategic merge), bukan posisi env: patch posisi
+  # (env/7) diam-diam mengenai variabel lain setiap kali urutan env berubah.
   - target: { group: apps, version: v1, kind: Deployment, name: bnpb-aggregator }
     patch: |-
-      - op: replace
-        path: /spec/template/spec/containers/0/env/7/value
-        value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@mongo-router:27017/?authSource=admin
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: bnpb-aggregator
+      spec:
+        template:
+          spec:
+            containers:
+              - name: bnpb-aggregator
+                env:
+                  - name: MONGO_URI
+                    value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@mongo-router:27017/?authSource=admin
+  # Komponen berstate satu replika (state di PVC local-path yang terikat ke satu node) ditempatkan
+  # di node control-plane. Skenario mematikan node hanya dikenakan pada worker non-control-plane
+  # (Ketentuan Platform no. 4), jadi state ini tidak ikut hilang bersama worker. Batasan yang
+  # disadari: Kafka tetap satu broker; solusi penuh = 3 broker dengan replication factor 3.
+  - target: { kind: StatefulSet, name: kafka }
+    patch: &pinControlPlane |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { node-role.kubernetes.io/control-plane: "true" }
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+          - { key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule }
+  - target: { kind: Deployment, name: "^(bnpb-consumer-dashboard|bnpb-consumer-notifier|bnpb-satellite|bnpb-coastal|sensor-pantai)$" }
+    patch: *pinControlPlane
+
+# >>> images (scripts/push-images.sh)
+images:
+  - name: aat/bmkg-mock
+    newName: ghcr.io/angkaberapa/aat-bmkg-mock
+    newTag: "5a5d731"
+  - name: aat/pvmbg-mock
+    newName: ghcr.io/angkaberapa/aat-pvmbg-mock
+    newTag: "5a5d731"
+  - name: aat/bnpb-aggregator
+    newName: ghcr.io/angkaberapa/aat-bnpb-aggregator
+    newTag: "5a5d731"
+  - name: aat/bnpb-api
+    newName: ghcr.io/angkaberapa/aat-bnpb-api
+    newTag: "5a5d731"
+  - name: aat/bnpb-auth
+    newName: ghcr.io/angkaberapa/aat-bnpb-auth
+    newTag: "5a5d731"
+  - name: aat/bnpb-consumer-dashboard
+    newName: ghcr.io/angkaberapa/aat-bnpb-consumer-dashboard
+    newTag: "5a5d731"
+  - name: aat/bnpb-consumer-notifier
+    newName: ghcr.io/angkaberapa/aat-bnpb-consumer-notifier
+    newTag: "5a5d731"
+  - name: aat/bnpb-coastal
+    newName: ghcr.io/angkaberapa/aat-bnpb-coastal
+    newTag: "5a5d731"
+  - name: aat/bnpb-satellite
+    newName: ghcr.io/angkaberapa/aat-bnpb-satellite
+    newTag: "5a5d731"
+# <<< images

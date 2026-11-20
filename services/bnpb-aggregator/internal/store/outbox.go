@@ -41,12 +41,14 @@ const (
 )
 
 type outboxMeta struct {
-	Version       int        `bson:"version"`
-	ContentHash   string     `bson:"content_hash"`
-	Pending       bool       `bson:"pending"`
-	CorrelationID string     `bson:"correlation_id"` // poll cycle that produced this version
-	ChangedAt     time.Time  `bson:"changed_at"`
-	PublishedAt   *time.Time `bson:"published_at,omitempty"`
+	Version       int    `bson:"version"`
+	ContentHash   string `bson:"content_hash"`
+	Pending       bool   `bson:"pending"`
+	CorrelationID string `bson:"correlation_id"` // poll cycle that produced this version
+	// M2: konteks trace W3C saat versi ini disimpan, supaya trace berlanjut lewat Kafka ke consumer.
+	TraceParent string     `bson:"traceparent,omitempty"`
+	ChangedAt   time.Time  `bson:"changed_at"`
+	PublishedAt *time.Time `bson:"published_at,omitempty"`
 }
 
 // OutboxEntry is one hazard version waiting to be published.
@@ -54,6 +56,7 @@ type OutboxEntry struct {
 	Event         domain.HazardEvent
 	Version       int
 	CorrelationID string
+	TraceParent   string
 	ChangedAt     time.Time
 }
 
@@ -125,6 +128,7 @@ func (s *Store) save(ctx context.Context, e domain.HazardEvent) (SaveResult, err
 	fields["outbox.content_hash"] = hash
 	fields["outbox.pending"] = true
 	fields["outbox.correlation_id"] = core.CorrelationID(ctx)
+	fields["outbox.traceparent"] = core.TraceParent(ctx)
 	fields["outbox.changed_at"] = time.Now().UTC()
 
 	update := bson.D{
@@ -177,6 +181,7 @@ func (s *Store) Pending(ctx context.Context, limit int) ([]OutboxEntry, error) {
 			Event:         d.HazardEvent,
 			Version:       d.Outbox.Version,
 			CorrelationID: d.Outbox.CorrelationID,
+			TraceParent:   d.Outbox.TraceParent,
 			ChangedAt:     d.Outbox.ChangedAt,
 		})
 	}
