@@ -18,6 +18,7 @@ func TestEventIndexesSupportShardRoutingAndStableOrdering(t *testing.T) {
 		{{Key: "source", Value: 1}, {Key: "source_ref_id", Value: 1}},
 		{{Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
 		{{Key: "source", Value: 1}, {Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+		{{Key: "hazard_type", Value: 1}, {Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
 		{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}},
 	}
 

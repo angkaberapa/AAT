@@ -1,432 +1,175 @@
-# IF4031 - AturATur
+# IF4031 - AturATur · Platform Koordinasi Bencana BNPB (Milestone 2)
 
-## Arsitektur sistem secara umum
+BNPB menarik data BMKG (gempa/tsunami) dan PVMBG (gunung api), menerima aliran Feed Satelit
+(kebakaran) dan Sensor Pantai (pesisir), memetakannya menjadi `HazardEvent`, menyimpannya di
+Canonical Store yang di-shard, lalu menyajikannya ke client dan menyebarkannya lewat Kafka.
+Seluruh komponen berjalan di Kubernetes (k3s).
 
 ```mermaid
 flowchart LR
-    C[Media / Tim Lapangan / BNPB] -->|POST /token| AUTH[BNPB Auth]
-    C -->|REST + Bearer JWT| API[BNPB API]
-    API -->|REST internal| AGG[BNPB Aggregator]
-    AGG -->|X-BMKG-Key| BMKG[BMKG Mock]
-    AGG -->|Bearer token| PVMBG[PVMBG Mock]
-    AGG -->|read/write| MONGO[(MongoDB)]
-    AGG -->|HazardEvent| KAFKA[(Kafka)]
-    KAFKA --> DASH[Dashboard Consumer]
-    KAFKA --> NOTIF[Notification Consumer]
-    KAFKA -.-> PEMDA[Pemda Consumer opsional]
+    C[Media / Tim Lapangan / Ops] -->|token| AUTH[bnpb-auth]
+    C -->|REST + JWT| API[bnpb-api x3]
+    API --> AGG[bnpb-aggregator x3<br/>1 leader polling]
+    AGG -->|poll| BMKG[bmkg-mock] & PVMBG[pvmbg-mock]
+    SAT[bnpb-satellite] -->|SSE| FEED[(Feed Satelit asisten)]
+    COA[bnpb-coastal] -->|poll| SP[sensor-pantai asisten]
+    SAT & COA -->|ingest internal| AGG
+    AGG --> MONGO[(MongoDB sharded<br/>2 shard x 3 replika)]
+    AGG -->|outbox| KAFKA[(Kafka)]
+    KAFKA --> DASH[consumer-dashboard] & NOTIF[consumer-notifier]
+    PROM[Prometheus] -.scrape.-> API & AGG
+    API & AGG -.trace.-> JAEGER[Jaeger]
 ```
 
-| Service | Implementasi | Port host | Peran |
-|---|---|---:|---|
-| `bmkg-mock` | TypeScript + Fastify | `8081` | Sumber SeismicEvent dan TsunamiWarning |
-| `pvmbg-mock` | Python + FastAPI | `8082` | Sumber VolcanicReport, schema switch, dan controlled outage |
-| `bnpb-aggregator` | Go | internal `8000` | Polling, canonical mapping, MongoDB owner, dan Kafka producer |
-| `bnpb-api` | Go | `8080` | API yang digunakan client downstream |
-| `bnpb-auth` | Go | `8090` | Penerbit JWT dan refresh token |
-| `bnpb-consumer-dashboard` | Go | `8091` | Materialized dashboard dari Kafka |
-| `bnpb-consumer-notifier` | Go | `8092` | Simulasi notifikasi SIAGA/AWAS |
-| `bnpb-consumer-pemda` | Go | `8093` | Consumer tambahan melalui profile `pemda` |
-| `mongo` | MongoDB 7 | tidak dipublikasi | Canonical Store milik Aggregator |
-| `kafka` | Kafka 3.9 KRaft | tidak dipublikasi | Distribusi perubahan HazardEvent |
+## Menjalankan sistem
 
-## Cara menjalankan sistem
+### Prasyarat
+- `kubectl` ≥ 1.30, `git`, `bash`, `curl`, `python3`
+- Pengembangan lokal: Docker + [`k3d`](https://k3d.io). Demo: cluster k3s multi-node (lihat
+  [docs/DEMO-CLUSTER.md](docs/DEMO-CLUSTER.md), mulai dari pembuatan VM).
+- `.env`: `cp .env.example .env`, lalu ganti semua nilai `change-me`. Token dari asisten:
+  `AUDIT_TOKEN`, `SATELLITE_TOKEN`, `PANTAI_AUTH_TOKEN`.
 
-### Requirement
+### Satu perintah deploy
+```bash
+# Lokal (k3d, 1 server + 2 agent): buat cluster, build & import image, lalu deploy
+scripts/k3d-up.sh && scripts/deploy.sh
 
-- Git
-- Docker Desktop atau Docker Engine dengan Docker Compose v2
-- Postman Desktop atau Postman Web dengan Desktop Agent
-- PowerShell Windows
-- Git Bash atau WSL (untuk menjalankan skrip load test P2)
+# Cluster demo (k3s multi-node, image dari GHCR)
+OVERLAY=demo scripts/deploy.sh
+```
+`deploy.sh` membuat Secret `bnpb-secrets` dari kunci rahasia di `.env`, menerapkan
+`k8s/overlays/<OVERLAY>`, lalu menunggu semua workload siap. Semua komponen berada di namespace
+`sistem-informasi-kebencanaan-bnpb`.
 
-### 1. Siapkan konfigurasi
+### Setelah mengubah kode
+- **Lokal (k3d)**: `SKIP_CLUSTER=1 scripts/k3d-up.sh` (build ulang + restart pod).
+- **Cluster demo**: node menarik image dari GHCR, jadi setiap perubahan kode harus di-push dulu:
+  ```bash
+  git commit ...                                   # script menolak jalan bila services/ belum di-commit
+  docker login ghcr.io -u angkaberapa              # sekali; token classic ber-scope write:packages
+  scripts/push-images.sh                           # build + push ghcr.io/angkaberapa/aat-*:<commit>,
+                                                   # lalu menulis tag itu di k8s/overlays/demo
+  git commit -am "chore(k8s): demo images <commit>" && git push
+  OVERLAY=demo scripts/deploy.sh                   # di cluster demo, setelah git pull
+  ```
+  Push hanya bisa dari akun yang punya akses tulis ke package `angkaberapa/aat-*`. Package sudah
+  public; service baru menghasilkan package baru yang perlu dijadikan public sekali.
 
-Jalankan dari root repository:
+### Endpoint
+Lokal memakai `localhost`; cluster demo memakai IP node mana pun (ServiceLB k3s).
 
-```powershell
-Copy-Item .env.example .env
-notepad .env
+| Port | Service | Port | Service |
+|---:|---|---:|---|
+| 8080 | bnpb-api | 8091 | dashboard consumer + analitik (`/analytics`) |
+| 8090 | bnpb-auth | 8092 | notifier (`/notifications`) |
+| 8081 / 8082 | bmkg-mock / pvmbg-mock | 3000 | Grafana (dashboard metrik) |
+| 9090 | Prometheus | 16686 | Jaeger (trace) |
+
+Service internal (aggregator, satellite, coastal, Mongo, Kafka) tidak dibuka; akses dengan
+`kubectl -n sistem-informasi-kebencanaan-bnpb port-forward svc/bnpb-aggregator 8000:8000`.
+
+Variabel yang dipakai contoh di bawah:
+```bash
+set -a; . ./.env; set +a
+API=http://localhost:8080; AUTH=http://localhost:8090; AGG=http://localhost:8000   # AGG via port-forward
+token() { curl -s -X POST $AUTH/token -H 'Content-Type: application/json' \
+  -d "{\"client_id\":\"$1\",\"client_secret\":\"$2\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])'; }
+OPS=$(token $CLIENT_OPS_ID $CLIENT_OPS_SECRET); FIELD=$(token $CLIENT_FIELD_ID $CLIENT_FIELD_SECRET)
 ```
 
-### 2. Jalankan semua service
+## Deklarasi topologi
 
-```powershell
-docker compose config --quiet
-docker compose up -d --build
-docker compose ps
-```
+| Node | Jenis | Host fisik | Peran | Label |
+|---|---|---|---|---|
+| node-a1 | VM (VirtualBox) | Laptop A — _CPU/RAM_ | control-plane + worker | host-a, shard-0 |
+| node-a2 | VM | Laptop A | worker | host-a, shard-1 |
+| node-b1 | VM | Laptop B — _CPU/RAM_ | worker | host-b, shard-0 |
+| node-b2 | VM | Laptop B | worker | host-b, shard-1 |
+| node-c1 | VM | Laptop C — _CPU/RAM_ | worker | host-c, shard-0 |
+| node-c2 | VM | Laptop C | worker | host-c, shard-1 |
 
-Tunggu sampai seluruh service pada kolom `STATUS` bertuliskan `healthy`
-
-### 3. Periksa endpoint melalui Postman
-
-Buat collection bernama **AAT M1**, lalu tambahkan request `GET` berikut. Masing-masing harus menghasilkan status `200` dan body dengan `status: "ok"`:
-
-| Service | URL |
-|---|---|
-| BNPB API | `http://localhost:8080/health` |
-| BMKG Mock | `http://localhost:8081/health` |
-| PVMBG Mock | `http://localhost:8082/health` |
-| BNPB Auth | `http://localhost:8090/health` |
-| Dashboard Consumer | `http://localhost:8091/health` |
-| Notification Consumer | `http://localhost:8092/health` |
-
-Dokumentasi interaktif PVMBG juga tersedia di <http://localhost:8082/docs>
-
-### 4. Siapkan Postman Environment
-
-Buat environment bernama **AAT Local** dengan nilai berikut. Nilai kredensial harus disesuaikan apabila `.env` sudah diubah
-
-| Variable | Initial value |
-|---|---|
-| `api_url` | `http://localhost:8080` |
-| `auth_url` | `http://localhost:8090` |
-| `bmkg_url` | `http://localhost:8081` |
-| `pvmbg_url` | `http://localhost:8082` |
-| `dashboard_url` | `http://localhost:8091` |
-| `notifier_url` | `http://localhost:8092` |
-| `pemda_url` | `http://localhost:8093` |
-| `bmkg_key` | `bmkg-key-change-me` |
-| `pvmbg_token` | `pvmbg.v1.change-me` |
-| `media_id` | `media` |
-| `media_secret` | `media-secret-change-me` |
-| `field_id` | `field-team` |
-| `field_secret` | `field-secret-change-me` |
-| `ops_id` | `bnpb-ops` |
-| `ops_secret` | `ops-secret-change-me` |
-| `media_token` | kosong |
-| `field_token` | kosong |
-| `field_refresh_token` | kosong |
-| `ops_token` | kosong |
-
-Aktifkan environment **AAT Local** sebelum mengirim request
-
-### 5. Ambil token melalui Postman
-
-Buat tiga request `POST {{auth_url}}/token`. Pilih **Body > raw > JSON**
-
-Body untuk Media:
-
-```json
-{
-  "client_id": "{{media_id}}",
-  "client_secret": "{{media_secret}}"
-}
-```
-
-Body untuk Tim Lapangan:
-
-```json
-{
-  "client_id": "{{field_id}}",
-  "client_secret": "{{field_secret}}"
-}
-```
-
-Body untuk BNPB Operations:
-
-```json
-{
-  "client_id": "{{ops_id}}",
-  "client_secret": "{{ops_secret}}"
-}
-```
-
-Ketiganya harus menghasilkan `200`. Salin `access_token` masing-masing ke `media_token`, `field_token`, dan `ops_token`. Salin juga refresh token Tim Lapangan ke `field_refresh_token`. Token dapat disimpan otomatis menggunakan script Post-response berikut, dengan mengganti nama variabel sesuai request:
-
-```javascript
-const body = pm.response.json();
-pm.environment.set("field_token", body.access_token);
-pm.environment.set("field_refresh_token", body.refresh_token);
-```
-
-Untuk memeriksa data awal, buat request `GET {{api_url}}/hazards?limit=5`, pilih **Authorization > Bearer Token**, lalu isi `{{ops_token}}`.
-
-### Menghentikan dan mereset sistem
-
-Menghentikan container tanpa menghapus data:
-
-```powershell
-docker compose down
-```
-
-Mereset seluruh data MongoDB, Kafka, dan state consumer:
-
-```powershell
-docker compose down -v
-```
+_TODO: isi CPU/RAM tiap laptop dan IP node._ Skenario yang mematikan node hanya dikenakan pada
+worker non-control-plane. Komponen berstate satu replika (Kafka, consumer, satellite, coastal,
+sensor-pantai) di-pin ke control-plane karena PVC `local-path` terikat ke satu node.
 
 ## Variabel konfigurasi
 
-Semua nilai yang dapat diatur pengguna terdapat di `.env.example`. Compose hanya memberikan
-variabel yang diperlukan kepada masing-masing container, misalnya kredensial BMKG dan PVMBG
-tidak diberikan kepada `bnpb-api`
+- **Rahasia** (`.env` → Secret `bnpb-secrets`, daftar lengkap di `SECRET_KEYS` pada
+  `scripts/deploy.sh`): `BMKG_API_KEY`, `PVMBG_TOKEN`, `AUDIT_TOKEN`, `MONGO_ROOT_USER`,
+  `MONGO_ROOT_PASSWORD`, `MONGO_CLUSTER_KEY`, `JWT_SIGNING_KEY`, `CLIENT_{MEDIA,FIELD,OPS}_{ID,SECRET}`,
+  `PANTAI_AUTH_TOKEN`, `SATELLITE_TOKEN`, `COASTAL_INGEST_TOKEN`, `FIELD_REPORT_INGEST_TOKEN`,
+  `GRAFANA_ADMIN_PASSWORD`.
+- **Non-rahasia** (ConfigMap per service di `k8s/base/config.yaml`, `satellite.yaml`,
+  `coastal.yaml`, `observability.yaml`). Setiap kunci beserta artinya dijelaskan di
+  `.env.example`. Yang paling sering diubah saat pengujian:
 
-### Port
+| Variabel | Bawaan | Arti |
+|---|---|---|
+| `POLL_INTERVAL_SECONDS` / `SOURCE_STALE_AFTER_SECONDS` | 3 / 15 | Siklus poll BMKG/PVMBG dan batas data dianggap stale |
+| `LEASE_DURATION_SECONDS` / `LEASE_RENEW_DEADLINE_SECONDS` | 15 / 10 | Kapan leader aggregator dianggap hilang (P2) |
+| `MAX_CONCURRENT_REQUESTS` / `MEDIA_MAX_CONCURRENT_REQUESTS` / `RATE_LIMIT_RPS` | 128 / 96 / 300 | Batas beban bnpb-api, prioritas Tim Lapangan (P5) |
+| `PVMBG_COMPATIBILITY_VERSION` | 2 | Versi skema PVMBG yang diterima otomatis (P3) |
+| `SATELLITE_ALLOWED_LATENESS_SECONDS` | 21600 | Batas keterlambatan deteksi (P4) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | Sampling trace (turunkan saat load test besar) |
 
-| Variabel | Default contoh | Digunakan oleh | Keterangan |
-|---|---:|---|---|
-| `LOG_LEVEL` | `INFO` | seluruh service | Level structured logging |
-| `API_PORT` | `8080` | Compose | Port host BNPB API |
-| `BMKG_PORT` | `8081` | Compose | Port host BMKG mock |
-| `PVMBG_PORT` | `8082` | Compose | Port host PVMBG mock |
-| `AUTH_PORT` | `8090` | Compose | Port host Auth Service |
-| `DASHBOARD_PORT` | `8091` | Compose | Port host Dashboard Consumer |
-| `NOTIFIER_PORT` | `8092` | Compose | Port host Notification Consumer |
-| `PEMDA_PORT` | `8093` | Compose | Port host consumer opsional Pemda |
+## Observabilitas
+- **Metrik**: Grafana `:3000` → dashboard "BNPB - Observabilitas" (throughput, error rate, latensi
+  per service, panggilan keluar, leader P2, Feed Satelit, Sensor Pantai, consumer Kafka, SLO).
+- **Trace**: Jaeger `:16686` → service `bnpb-api` / `bnpb-coastal` → Find Traces. Satu trace
+  menyambung API → aggregator → Mongo → Kafka → consumer, dengan durasi tiap langkah.
+- **Log**: JSON ber-`correlation_id` dan `trace_id`:
+  `kubectl -n sistem-informasi-kebencanaan-bnpb logs deploy/bnpb-aggregator | grep <id>`.
 
-### Sumber dan Aggregator
-
-| Variabel | Default contoh | Keterangan |
-|---|---:|---|
-| `BMKG_API_KEY` | `bmkg-key-change-me` | Nilai header `X-BMKG-Key`, wajib diisi |
-| `BMKG_RESPONSE_DELAY_MS` | `100` | Delay respons BMKG dalam milidetik |
-| `BMKG_NEW_EVENT_INTERVAL_SECONDS` | `10` | Interval pembuatan data BMKG |
-| `PVMBG_TOKEN` | `pvmbg.v1.change-me` | Bearer token PVMBG, wajib diisi |
-| `PVMBG_RESPONSE_DELAY_MIN_MS` | `500` | Batas bawah delay acak PVMBG |
-| `PVMBG_RESPONSE_DELAY_MAX_MS` | `3000` | Batas atas delay acak PVMBG |
-| `PVMBG_NEW_EVENT_INTERVAL_SECONDS` | `10` | Interval pembuatan laporan PVMBG |
-| `POLL_INTERVAL_SECONDS` | `3` | Interval polling Aggregator |
-| `UPSTREAM_TIMEOUT_MS` | `5000` | Timeout Aggregator ke sumber, harus melebihi delay normal maksimum PVMBG |
-| `SOURCE_STALE_AFTER_SECONDS` | `15` | Batas tanpa poll sukses sebelum data ditandai stale |
-| `SNAPSHOT_DEFAULT_LIMIT` | `200` | Jumlah maksimum default untuk snapshot `/hazards` |
-| `SNAPSHOT_MAX_LIMIT` | `1000` | Nilai `limit` terbesar yang diterima |
-
-### API dan autentikasi
-
-| Variabel | Default contoh | Keterangan |
-|---|---:|---|
-| `API_UPSTREAM_TIMEOUT_MS` | `2000` | Timeout BNPB API ke Aggregator |
-| `MAX_CONCURRENT_REQUESTS` | `128` | Batas request aktif bersamaan, `0` menonaktifkan |
-| `RATE_LIMIT_RPS` | `300` | Token bucket per identitas JWT, `0` menonaktifkan |
-| `RATE_LIMIT_BURST` | `600` | Kapasitas burst per identitas JWT |
-| `JWT_SIGNING_KEY` | `change-me-to-a-long-random-string` | Seed private signing key Ed25519, minimal 32 karakter |
-| `JWT_ISSUER` | `bnpb-auth` | Claim issuer yang diterbitkan dan diverifikasi |
-| `JWT_AUDIENCE` | `bnpb-api` | Claim audience yang diterbitkan dan diverifikasi |
-| `ACCESS_TOKEN_TTL_SECONDS` | `60` | Umur access token |
-| `REFRESH_TOKEN_TTL_SECONDS` | `3600` | Umur refresh token, harus lebih panjang dari access token |
-| `JWKS_CACHE_TTL_SECONDS` | `300` | Lama public signing key disimpan BNPB API |
-| `CLIENT_MEDIA_ID` | `media` | Identitas client Media |
-| `CLIENT_MEDIA_SECRET` | `media-secret-change-me` | Secret client Media, wajib unik |
-| `CLIENT_FIELD_ID` | `field-team` | Identitas client Tim Lapangan |
-| `CLIENT_FIELD_SECRET` | `field-secret-change-me` | Secret Tim Lapangan, wajib unik |
-| `CLIENT_OPS_ID` | `bnpb-ops` | Identitas client BNPB Operations |
-| `CLIENT_OPS_SECRET` | `ops-secret-change-me` | Secret BNPB Operations, wajib unik |
-
-### Penyimpanan, broker, dan consumer
-
-| Variabel | Default contoh | Keterangan |
-|---|---:|---|
-| `MONGO_ROOT_USER` | `bnpb` | Username MongoDB, wajib diisi |
-| `MONGO_ROOT_PASSWORD` | `change-me` | Password MongoDB, wajib diisi |
-| `MONGO_DB` | `bnpb` | Nama database Canonical Store |
-| `KAFKA_HAZARD_TOPIC` | `hazard-events` | Topic perubahan HazardEvent |
-| `KAFKA_TOPIC_PARTITIONS` | `3` | Jumlah partition topic |
-| `KAFKA_TOPIC_RETENTION_HOURS` | `168` | Retensi topic dalam jam |
-| `OUTBOX_RELAY_INTERVAL_MS` | `1000` | Interval relay transactional outbox |
-| `OUTBOX_BATCH_SIZE` | `100` | Maksimum event per batch relay |
-| `DASHBOARD_PROCESSING_DELAY_MS` | `0` | Delay buatan per event pada Dashboard Consumer |
-| `NOTIFIER_PROCESSING_DELAY_MS` | `0` | Delay buatan per event pada Notification Consumer |
-
-## Skenario pengujian P1-P5
-
-Pengujian fungsional di bawah menggunakan collection dan environment Postman yang telah dibuat pada langkah sebelumnya. Terminal hanya digunakan untuk mengatur lifecycle container, menjalankan load test, dan menjalankan automated test
-
-### P1
-
-1. Buat `GET {{pvmbg_url}}/volcanic-reports`. Pilih **Authorization > Bearer Token** dan isi `{{pvmbg_token}}`. Kirim request dan pastikan schema versi 1 belum memiliki `confidence_level`
-2. Buat `POST {{pvmbg_url}}/admin/schema-version`, pilih **Body > raw > JSON**, lalu kirim:
-
-```json
-{"version": 2}
-```
-
-3. Kirim kembali request laporan PVMBG. Setiap laporan sekarang memiliki
-   `confidence_level` tanpa ada restart container
-4. Tunggu beberapa detik agar laporan baru dipoll. Buat `GET {{api_url}}/hazards?source=PVMBG&limit=20` menggunakan Bearer Token `{{ops_token}}`. Data kanonis menyimpan nilai tersebut pada `attributes.confidence_level`
-5. Kembalikan schema ke versi 1 menggunakan request admin yang sama dengan body:
-
-```json
-{"version": 1}
-```
-
-### P2
-
-Untuk kriteria head-of-line blocking, ubah sementara kedua nilai berikut di `.env` menjadi `3000`, lalu recreate PVMBG:
-
-```text
-PVMBG_RESPONSE_DELAY_MIN_MS=3000
-PVMBG_RESPONSE_DELAY_MAX_MS=3000
-```
-
-```powershell
-docker compose up -d --force-recreate pvmbg-mock
-```
-
-Jalankan dari Git Bash atau WSL:
-
+## Tester Agent
 ```bash
-bash ./loadtest/run.sh p2-k1-hol.js
-bash ./loadtest/run.sh p2-k2-load.js
-bash ./loadtest/run.sh p2-k3-outage.js
+kubectl apply -f https://raw.githubusercontent.com/susTuna/if4031-tester-agent/ebb55261711123a9a211739ffbf140a275caa6da/manifest.yaml
+kubectl exec -n tester-agent daemonset/tester-agent -- /app list
+kubectl exec -n tester-agent daemonset/tester-agent -- /app run practice <nama>
+kubectl logs -n tester-agent daemonset/tester-agent -f
 ```
 
-- `p2-k1-hol.js` membuktikan query BMKG tidak tertahan oleh PVMBG yang lambat
-- `p2-k2-load.js` menjalankan 60 virtual users selama 75 detik dan mencatat throughput,
-  persentil latensi, 429, dan error rate
-- `p2-k3-outage.js` menyalakan outage PVMBG, memeriksa data stale tetap tersedia, lalu
-  memulihkannya tanpa restart
+## Memicu skenario pengujian
 
-Hasil Markdown dan JSON ditulis ke `loadtest/results/`. Setelah pengujian, kembalikan delay PVMBG di `.env` ke `500` dan `3000`, lalu jalankan kembali perintah recreate di atas
+### P1 — Sharding & replikasi (overlay demo)
+1. **Muat katalog gempa**: `curl -X POST $AGG/internal/catalog/seismic-events -H "Authorization: Bearer $AUDIT_TOKEN" -H 'Content-Type: application/json' -d @katalog.json` (body `{"events":[...]}`).
+2. **Sebaran & beban per node**: `pwsh scripts/p1-inspect.ps1`, `pwsh scripts/p1-measure-load.ps1 -DurationSeconds 120`.
+3. **Baca lintas shard**: `curl "$API/hazards?limit=50" -H "Authorization: Bearer $OPS"`, halaman berikutnya dengan `cursor` dari `meta`.
+4. **Node mati**: matikan VM worker (atau skenario Tester Agent), lalu bandingkan `curl "$AGG/internal/audit/checksum?source=BMKG" -H "Authorization: Bearer $AUDIT_TOKEN"` dengan checksum asisten; respons selama pemulihan memuat `partial`/`unavailable_units`.
+5. **Node baru**: `pwsh scripts/p1-replace-member.ps1 -StatefulSet mongo-shard-0 -ReplacementNode <node> -ConfirmDataLoss`.
+6. **Dashboard analitik**: `http://<node>:8091/analytics`.
 
-Outage juga dapat didemonstrasikan melalui Postman:
+### P2 — Aggregator ≥3 instance, satu leader
+1. **Leader & failover**: `kubectl -n sistem-informasi-kebencanaan-bnpb get lease bnpb-aggregator-ingest`, hapus pod pemegang lease, lalu amati leader baru (< 60 s) di Grafana (panel "Leader per pod").
+2. **Tepat sekali**: `kubectl -n sistem-informasi-kebencanaan-bnpb logs deploy/bmkg-mock | grep -o '"caller_instance":"[^"]*"' | uniq -c` hanya memuat pod leader (berganti hanya saat failover); Grafana panel "Tulisan ditolak fencing".
+3. **Freeze** (di VM worker tempat leader berjalan): `sudo kill -STOP <pid>` selama > 15 s, lalu `sudo kill -CONT <pid>`; log memuat `write rejected by fencing token, stepping down`.
+4. **Clock skew** (di VM worker): `sudo timedatectl set-ntp false && sudo date -s '+45 seconds'`, lalu `-75 seconds`; tidak ada dua epoch yang sama-sama berhasil menulis.
+5. **Load test 10.000 VU + scale 3→5→2 / ganti versi**: `loadtest/p2m2-scale.sh` dan `MODE=rollout loadtest/p2m2-scale.sh` (cluster demo: `K6_NETWORK=host API_HOST=<ip-node>`). Hasil di `loadtest/results/`.
 
-1. Buat `POST {{pvmbg_url}}/admin/outage` dengan body JSON `{"enabled":true,"mode":"error"}`
-2. Tunggu beberapa detik
-3. Kirim `GET {{api_url}}/hazards?hazard_type=VOLCANIC` dengan Bearer Token `{{ops_token}}`
-4. Pastikan respons tetap `200`, data lama tetap tersedia, dan `meta.stale` bernilai `true`
-5. Periksa `GET {{api_url}}/hazards?hazard_type=SEISMIC`; data BMKG harus tetap fresh
-6. Pulihkan PVMBG melalui request admin yang sama dengan body `{"enabled":false}`
-7. Tunggu satu siklus polling dan pastikan `meta.stale` kembali `false` tanpa restart
+### P3 — Skema berubah, pesan rusak, laporan lapangan
+1. **Perubahan skema**: `curl -X POST localhost:8082/admin/schema-version -H 'Content-Type: application/json' -d '{"version":3}'` (2 = field baru, diterima otomatis; 3 = rename `alert_level`; 4 = tipe berubah; 5 = field wajib hilang).
+2. **Pesan rusak**: `curl -X POST localhost:8082/admin/payload-mode -d '{"mode":"truncated"}' -H 'Content-Type: application/json'` (`deep`, `invalid_utf8`, `oversized`, `normal`).
+3. **Periksa pesan gagal**: `curl "$AGG/internal/audit/unprocessed" -H "Authorization: Bearer $AUDIT_TOKEN"` (`retrying` vs `parked`).
+4. **Proses ulang**: ubah `PVMBG_COMPATIBILITY_VERSION` di `k8s/base/config.yaml`, `scripts/deploy.sh`, lalu `curl -X POST "$AGG/internal/admin/unprocessed/replay?limit=100" -H "Authorization: Bearer $AUDIT_TOKEN"`.
+5. **Laporan lapangan**: `curl -X POST $API/field-reports -H "Authorization: Bearer $FIELD" -H 'Idempotency-Key: r-001' -H 'Content-Type: application/json' -d '{"occurred_at":"2026-11-20T10:00:00Z","area_name":"Palu","latitude":-0.9,"longitude":119.87,"severity":"SIAGA","description":"banjir"}'` → `202`; matikan pod aggregator setelahnya, laporan tetap diproses tepat sekali.
 
-### P3
+### P4 — Feed Satelit (butuh `SATELLITE_TOKEN`)
+- Status & lag: Grafana baris "P4 - Feed Satelit", `GET $API/hazards?hazard_type=WILDFIRE` (`meta.sources.SATELIT`).
+- Putus-sambung / komponen mati: `kubectl delete pod -l app=bnpb-satellite`; berlanjut dari offset tersimpan.
+- Sesi ujian: `curl -X POST https://satellite.naufarrel.dev/v1/exam/start -H "Authorization: Bearer <token-ujian>"`.
 
-Gunakan Postman untuk menjalankan tabel berikut:
+### P5 — Sensor Pantai
+- Profil sensor: `PANTAI_PROFILE` di `k8s/base/coastal.yaml` (`practice` / `exam`).
+- Prioritas beban: `K6_NETWORK=k3d-bnpb loadtest/run.sh p5-priority.js -e API_URL=http://k3d-bnpb-server-0:8080 -e AUTH_URL=http://k3d-bnpb-server-0:8090` (demo: `K6_NETWORK=host`, IP node). Media mendapat 429, Tim Lapangan tetap 200.
+- Peringatan kritis & SLO: `curl localhost:8092/notifications`, Grafana baris "SLO jalur peringatan".
+- Kesehatan sensor: `meta.sources.SENSOR_PANTAI` dan panel "Circuit breaker".
 
-| Skenario | Request | Authorization | Hasil yang diharapkan |
-|---|---|---|---|
-| Media membaca ringkasan | `GET {{api_url}}/hazards?limit=1` | Bearer `{{media_token}}` | `200`; tidak ada `source_ref_id`, `latitude`, `longitude`, atau `attributes` |
-| Media meminta raw field | `GET {{api_url}}/hazards?fields=hazard_id,latitude,attributes` | Bearer `{{media_token}}` | `403 insufficient_scope` |
-| Tim Lapangan meminta raw field | URL yang sama | Bearer `{{field_token}}` | `200`; raw field tersedia |
-| Tanpa token | `GET {{api_url}}/hazards` | No Auth | `401` |
-| Token invalid | `GET {{api_url}}/hazards` | Bearer `invalid-token` | `401` |
+### Pengujian fungsi M1 (masih berlaku)
+Keputusan M1 terbawa ke M2. Langkah uji M1 (setup Postman, scope Media vs Tim Lapangan, refresh
+token, outage PVMBG + `stale_since`, consumer menyusul) ada di [docs/README-M1.md](docs/README-M1.md);
+jalankan request yang sama ke endpoint cluster (tabel Endpoint di atas), bukan ke docker compose.
 
-Untuk menguji expiry, terbitkan token baru, tunggu lebih dari 60 detik, lalu kirim kembali
-request dengan token tersebut
-
-Untuk menguji refresh-token rotation, buat `POST {{auth_url}}/token/refresh` dengan body:
-
-```json
-{
-  "refresh_token": "{{field_refresh_token}}"
-}
-```
-
-### P4
-
-MongoDB tidak membuka port ke host:
-
-```powershell
-Test-NetConnection localhost -Port 27017
-```
-
-`TcpTestSucceeded` seharusnya `False`, sedangkan data tetap dapat dibaca melalui BNPB API. Untuk membuktikan persistensi, ambil data, restart hanya Aggregator, lalu baca kembali:
-
-1. Di Postman, kirim `GET {{api_url}}/hazards?limit=1` dengan Bearer Token `{{ops_token}}`. Simpan respons atau catat `hazard_id`.
-2. Restart hanya Aggregator:
-
-```powershell
-docker compose restart bnpb-aggregator
-Start-Sleep -Seconds 8
-```
-
-3. Kirim kembali request Postman yang sama. Data dan `hazard_id` sebelumnya seharusnya tetap tersedia karena volume MongoDB tidak ikut direstart
-
-### P5
-
-Periksa kedua consumer utama melalui Postman:
-
-| Request | Hasil yang diharapkan |
-|---|---|
-| `GET {{dashboard_url}}/dashboard` | `200`, statistik dan HazardEvent terbaru |
-| `GET {{notifier_url}}/notifications` | `200`, statistik dan notifikasi SIAGA/AWAS |
-
-Tambahkan consumer Pemda tanpa mengubah atau me-restart producer:
-
-```powershell
-docker compose --profile pemda up -d bnpb-consumer-pemda
-```
-
-Kirim `GET {{pemda_url}}/dashboard` melalui Postman
-
-Untuk menunjukkan consumer dapat menyusul event yang terlewat:
-
-```powershell
-docker compose stop bnpb-consumer-dashboard
-Start-Sleep -Seconds 20
-docker compose start bnpb-consumer-dashboard
-Start-Sleep -Seconds 8
-```
-
-Kirim kembali `GET {{dashboard_url}}/dashboard` melalui Postman. Nilai `stats.processed` seharusnya bertambah dan event yang dibuat selama consumer mati harus dapat disusul.
-
-Untuk menunjukkan transactional outbox menahan event ketika broker berhenti:
-
-```powershell
-docker compose stop kafka
-Start-Sleep -Seconds 15
-docker compose start kafka
-Start-Sleep -Seconds 15
-docker compose logs --since 1m bnpb-aggregator
-```
-
-## Menjalankan automated checks
-
-Semua module Go:
-
-```powershell
-$modules = @(
-  "services/bnpb-aggregator",
-  "services/bnpb-api",
-  "services/bnpb-auth",
-  "services/bnpb-consumer-dashboard",
-  "services/bnpb-consumer-notifier"
-)
-foreach ($module in $modules) {
-  Push-Location $module
-  go test -race -count=1 ./...
-  go vet ./...
-  Pop-Location
-}
-```
-
-PVMBG tanpa memasang Python lokal:
-
-```powershell
-docker build --target test -t aat-pvmbg-test ./services/pvmbg-mock
-docker run --rm aat-pvmbg-test
-docker run --rm aat-pvmbg-test ruff check app tests
-```
-
-BMKG dan seluruh image Compose:
-
-```powershell
-docker build -t aat-bmkg-test ./services/bmkg-mock
-docker compose build
-```
-
-## Observability
-
-- Semua service menghasilkan structured log satu baris ke stdout
-- Header `X-Correlation-ID` diterima atau dibuat pada request masuk, diteruskan ke panggilan downstream, dan dicetak pada log terkait
-- Panggilan HTTP keluar mencatat target dan latensi
-- Polling dan pemrosesan Kafka membuat correlation ID untuk setiap siklus/event
-
-Contoh melihat alur terbaru:
-
-```powershell
-docker compose logs --since 2m bnpb-api bnpb-aggregator pvmbg-mock
-```
-
-Untuk menelusuri correlation ID buatan sendiri:
-
-1. Buat request Postman `GET {{api_url}}/hazards?limit=1`
-2. Pada tab **Authorization**, pilih **Bearer Token** dan isi `{{ops_token}}`
-3. Pada tab **Headers**, tambahkan `X-Correlation-ID` dengan nilai `demo-laporan-001`
-4. Kirim request dan pastikan respons berhasil
-5. Cari correlation ID yang sama pada log service:
-
-```powershell
-docker compose logs --since 1m bnpb-api bnpb-aggregator |
-  Select-String "demo-laporan-001"
-```
+## Struktur repo
+`services/` (satu folder per service), `k8s/base` + `k8s/overlays/{dev,demo}`, `scripts/`
+(deploy, build image, P1), `loadtest/` (k6), `docs/DEMO-CLUSTER.md` (panduan VM & cluster).
+Kode yang dibuat dengan bantuan LLM ditandai di komentar kode.

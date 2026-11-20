@@ -116,6 +116,15 @@ func eventIndexes() []mongo.IndexModel {
 			Options: options.Index().
 				SetName("audit_source_ingested_order"),
 		},
+		// GET /hazards?hazard_type=X (urut ingested_at): tanpa index ini Mongo menelusuri index
+		// ingested_at dan membuang jenis lain. Dengan 105 ribu event SENSOR_PANTAI, mencari 50 event
+		// SEISMIC memeriksa ~6.800 dokumen (~400 ms) dan aggregator jenuh di uji 10k VU.
+		// Ditulis dengan bantuan LLM (Claude).
+		{
+			Keys: bson.D{{Key: "hazard_type", Value: 1}, {Key: "ingested_at", Value: 1}, {Key: "hazard_id", Value: 1}},
+			Options: options.Index().
+				SetName("hazard_type_ingested_order"),
+		},
 		{
 			Keys: bson.D{{Key: "occurred_at", Value: -1}, {Key: "hazard_id", Value: -1}},
 			Options: options.Index().

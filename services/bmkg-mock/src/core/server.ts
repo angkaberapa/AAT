@@ -30,6 +30,8 @@ export function buildServer(logger: FastifyBaseLogger, service: string): Fastify
         path,
         status: reply.statusCode,
         latency_ms: Math.round(reply.elapsedTime * 100) / 100,
+        // P2 M2: instance aggregator pemanggil, bukti hanya leader yang polling.
+        caller_instance: req.headers["x-instance-id"] ?? null,
       },
       "request handled",
     );
