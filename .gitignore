@@ -32,3 +32,9 @@ htmlcov/
 
 # load test output
 loadtest/results/
+
+# generated P1 development datasets
+testdata/p1/generated/
+
+# generated local test evidence
+evidence/
