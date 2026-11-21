@@ -9,8 +9,12 @@ import type { SeismicEvent, ThreatLevel, TsunamiWarning } from "./types.js";
 
 const seismicEvents: SeismicEvent[] = [];
 const tsunamiWarnings: TsunamiWarning[] = [];
-let eventSequence = 0;
-let warningSequence = 0;
+
+// Start sequences from wall-clock seconds so a mock restart does not reuse
+// BMKG-EQ-000001 and overwrite canonical events keyed by source_ref_id.
+const sequenceBase = Date.now();
+let eventSequence = sequenceBase;
+let warningSequence = sequenceBase;
 
 /** Guarantees every severity branch (magnitude band x threat level) shows up in the seed,
  *  instead of leaving that to chance across just 20 random draws. */
