@@ -19,22 +19,14 @@ patches:
       kind: Service
       metadata:
         name: mongo
-  # MONGO_URI diganti berdasarkan NAMA variabel (strategic merge), bukan posisi env: patch posisi
-  # (env/7) diam-diam mengenai variabel lain setiap kali urutan env berubah.
-  - target: { group: apps, version: v1, kind: Deployment, name: bnpb-aggregator }
+  - target: { version: v1, kind: ConfigMap, name: bnpb-aggregator-config }
     patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
+      apiVersion: v1
+      kind: ConfigMap
       metadata:
-        name: bnpb-aggregator
-      spec:
-        template:
-          spec:
-            containers:
-              - name: bnpb-aggregator
-                env:
-                  - name: MONGO_URI
-                    value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@mongo-router:27017/?authSource=admin
+        name: bnpb-aggregator-config
+      data:
+        MONGO_HOST: mongo-router:27017
   # Komponen berstate satu replika (state di PVC local-path yang terikat ke satu node) ditempatkan
   # di node control-plane. Skenario mematikan node hanya dikenakan pada worker non-control-plane
   # (Ketentuan Platform no. 4), jadi state ini tidak ikut hilang bersama worker. Batasan yang
@@ -56,29 +48,29 @@ patches:
 images:
   - name: aat/bmkg-mock
     newName: ghcr.io/angkaberapa/aat-bmkg-mock
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/pvmbg-mock
     newName: ghcr.io/angkaberapa/aat-pvmbg-mock
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-aggregator
     newName: ghcr.io/angkaberapa/aat-bnpb-aggregator
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-api
     newName: ghcr.io/angkaberapa/aat-bnpb-api
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-auth
     newName: ghcr.io/angkaberapa/aat-bnpb-auth
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-consumer-dashboard
     newName: ghcr.io/angkaberapa/aat-bnpb-consumer-dashboard
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-consumer-notifier
     newName: ghcr.io/angkaberapa/aat-bnpb-consumer-notifier
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-coastal
     newName: ghcr.io/angkaberapa/aat-bnpb-coastal
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-satellite
     newName: ghcr.io/angkaberapa/aat-bnpb-satellite
-    newTag: "5a5d731"
+    newTag: "5fad98c"
 # <<< images

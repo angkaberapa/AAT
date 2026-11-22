@@ -22,6 +22,11 @@ data:
       -p "$MONGO_ROOT_PASSWORD"
       --authenticationDatabase admin
     )
+    internal_auth=(
+      -u __system
+      -p "$(cat /keyfile/key)"
+      --authenticationDatabase local
+    )
 
     # On a normal restart the replica set and user already exist.
     for _ in $(seq 1 120); do
@@ -29,14 +34,14 @@ data:
         --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)' >/dev/null 2>&1; then
         exit 0
       fi
-      if mongosh --quiet --host 127.0.0.1 \
+      if mongosh --quiet --host 127.0.0.1 "${internal_auth[@]}" \
         --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)' >/dev/null 2>&1; then
         break
       fi
       sleep 2
     done
 
-    mongosh --quiet --host 127.0.0.1 --eval '
+    mongosh --quiet --host 127.0.0.1 "${internal_auth[@]}" --eval '
       try {
         rs.status().ok;
       } catch (error) {
@@ -45,12 +50,18 @@ data:
       }
     '
 
-    until mongosh --quiet --host 127.0.0.1 \
-      --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do
+    # The keyfile authenticates members as __system, which can safely create
+    # the first administrator on whichever member wins the election.
+    primary=""
+    until primary="$(mongosh --quiet --host 127.0.0.1 "${internal_auth[@]}" --eval '
+      const primary = db.hello().primary;
+      if (!primary) quit(1);
+      print(primary);
+    ' 2>/dev/null)" && [ -n "$primary" ]; do
       sleep 2
     done
 
-    mongosh --quiet --host 127.0.0.1 --eval '
+    mongosh --quiet --host "$primary" "${internal_auth[@]}" --eval '
       const admin = db.getSiblingDB("admin");
       if (!admin.getUser(process.env.MONGO_ROOT_USER)) {
         admin.createUser({
@@ -107,7 +118,7 @@ spec:
       containers:
         - name: mongo
           image: mongo:7
-          args: ["--configsvr", "--replSet", "config-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--dbpath", "/data/db", "--wiredTigerCacheSizeGB", "0.25"]
+          args: ["--configsvr", "--port", "27017", "--replSet", "config-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--dbpath", "/data/db", "--wiredTigerCacheSizeGB", "0.25"]
           lifecycle:
             postStart:
               exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
@@ -134,6 +145,10 @@ spec:
                   --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
             periodSeconds: 5
             timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             tcpSocket: { port: mongo }
             periodSeconds: 10
@@ -207,7 +222,7 @@ spec:
       containers:
         - name: mongo
           image: mongo:7
-          args: ["--shardsvr", "--replSet", "shard0-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+          args: ["--shardsvr", "--port", "27017", "--replSet", "shard0-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
           lifecycle:
             postStart:
               exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
@@ -234,6 +249,10 @@ spec:
                   --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
             periodSeconds: 5
             timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             tcpSocket: { port: mongo }
             periodSeconds: 10
@@ -307,7 +326,7 @@ spec:
       containers:
         - name: mongo
           image: mongo:7
-          args: ["--shardsvr", "--replSet", "shard1-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+          args: ["--shardsvr", "--port", "27017", "--replSet", "shard1-rs", "--keyFile", "/keyfile/key", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
           lifecycle:
             postStart:
               exec: { command: ["bash", "/bootstrap/bootstrap.sh"] }
@@ -334,6 +353,10 @@ spec:
                   --eval 'const h=db.hello(); quit(h.isWritablePrimary || h.secondary ? 0 : 1)'
             periodSeconds: 5
             timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             tcpSocket: { port: mongo }
             periodSeconds: 10
@@ -423,6 +446,10 @@ spec:
                   --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'
             periodSeconds: 5
             timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: mongo }
+            periodSeconds: 5
+            failureThreshold: 120
           livenessProbe:
             tcpSocket: { port: mongo }
             periodSeconds: 10

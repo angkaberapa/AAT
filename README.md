@@ -151,7 +151,7 @@ kubectl logs -n tester-agent daemonset/tester-agent -f
 1. **Perubahan skema**: `curl -X POST localhost:8082/admin/schema-version -H 'Content-Type: application/json' -d '{"version":3}'` (2 = field baru, diterima otomatis; 3 = rename `alert_level`; 4 = tipe berubah; 5 = field wajib hilang).
 2. **Pesan rusak**: `curl -X POST localhost:8082/admin/payload-mode -d '{"mode":"truncated"}' -H 'Content-Type: application/json'` (`deep`, `invalid_utf8`, `oversized`, `normal`).
 3. **Periksa pesan gagal**: `curl "$AGG/internal/audit/unprocessed" -H "Authorization: Bearer $AUDIT_TOKEN"` (`retrying` vs `parked`).
-4. **Proses ulang**: ubah `PVMBG_COMPATIBILITY_VERSION` di `k8s/base/config.yaml`, `scripts/deploy.sh`, lalu `curl -X POST "$AGG/internal/admin/unprocessed/replay?limit=100" -H "Authorization: Bearer $AUDIT_TOKEN"`.
+4. **Proses ulang**: ubah `PVMBG_COMPATIBILITY_VERSION` di `k8s/base/config.yaml`, `scripts/deploy.sh`, lalu proses seluruh antrean dengan `curl -X POST "$AGG/internal/admin/unprocessed/replay?limit=100" -H "Authorization: Bearer $AUDIT_TOKEN"`, atau satu pesan tanpa terhalang poison message lain dengan `curl -X POST "$AGG/internal/admin/unprocessed/replay?message_id=<message-id>" -H "Authorization: Bearer $AUDIT_TOKEN"`.
 5. **Laporan lapangan**: `curl -X POST $API/field-reports -H "Authorization: Bearer $FIELD" -H 'Idempotency-Key: r-001' -H 'Content-Type: application/json' -d '{"occurred_at":"2026-11-20T10:00:00Z","area_name":"Palu","latitude":-0.9,"longitude":119.87,"severity":"SIAGA","description":"banjir"}'` → `202`; matikan pod aggregator setelahnya, laporan tetap diproses tepat sekali.
 
 ### P4 — Feed Satelit (butuh `SATELLITE_TOKEN`)
