@@ -187,6 +187,7 @@ cluster ini, jangan di k3d (node k3d berbagi kernel dan jam dengan Docker).
 | Pod Mongo `Pending` | Label `bnpb.io/physical-host`/`mongo-shard` belum lengkap: `kubectl describe pod <pod>` |
 | Kafka/consumer/satellite/coastal `Pending` | Node control-plane tidak berlabel `node-role.kubernetes.io/control-plane=true` atau kehabisan RAM |
 | `ErrImagePull` | Package GHCR belum public atau tag di `k8s/overlays/demo/kustomization.yaml` belum di-push (`scripts/push-images.sh`) |
+| Pod lama di `ContainerCreating` / `Init:0/1`, event `Pulling image "mongo:7"` | Node baru menarik image besar dari Docker Hub (Mongo ±800 MB) dan bisa lambat/macet. Tarik dulu di setiap VM sebelum deploy: `sudo k3s ctr images pull docker.io/library/mongo:7 && sudo k3s ctr images pull docker.io/apache/kafka:3.9.0`, lalu hapus pod yang tertahan |
 | Aggregator restart terus | Lihat `kubectl -n $NS logs deploy/bnpb-aggregator --previous`; biasanya kunci `.env` kosong |
 | Jam antar-VM berbeda jauh | `timedatectl` → pastikan NTP aktif (kecuali saat uji clock skew) |
 

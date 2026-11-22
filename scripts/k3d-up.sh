@@ -29,6 +29,11 @@ for svc in "${SERVICES[@]}"; do
   docker build "${target[@]}" -t "aat/${svc}:dev" "$ROOT/services/$svc"
   images+=("aat/${svc}:dev")
 done
+# Image pihak ketiga ikut di-import bila sudah ada di Docker lokal, supaya cluster baru tidak
+# menarik ulang dari Docker Hub (pernah macet >8 menit di jaringan Docker Desktop).
+for img in mongo:7 apache/kafka:3.9.0 prom/prometheus:v2.55.1 grafana/grafana:11.3.0 jaegertracing/all-in-one:1.62.0; do
+  docker image inspect "$img" >/dev/null 2>&1 && images+=("$img")
+done
 k3d image import -c "$CLUSTER" "${images[@]}"
 
 # Pod lama tetap memakai image lama dengan tag yang sama; restart supaya mengambil hasil import.
