@@ -1,6 +1,7 @@
 package pvmbg
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -207,12 +208,47 @@ func TestFetchRejectsOversizedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	client.SetFailureSink(&fakeFailureSink{})
+	failures := &fakeFailureSink{}
+	client.SetFailureSink(failures)
 
 	_, err = client.Fetch(context.Background(), nil)
 	var sourceError *ingest.SourceError
 	if !errors.As(err, &sourceError) || sourceError.Kind != ingest.ErrorInvalidResponse {
 		t.Fatalf("Fetch() error = %v, want invalid response size error", err)
+	}
+	if len(failures.failures) != 1 || !strings.HasPrefix(failures.failures[0].Reason, "payload_too_large:") {
+		t.Fatalf("failures = %+v, want intact oversized response", failures.failures)
+	}
+	if len(failures.failures[0].RawPayload) != maxResponseBytes+1 {
+		t.Fatalf("raw payload bytes = %d, want %d", len(failures.failures[0].RawPayload), maxResponseBytes+1)
+	}
+}
+
+func TestFetchDistinguishesTruncatedAndDeepJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       []byte
+		reasonHead string
+	}{
+		{name: "truncated", body: []byte(`{"data":[{"report_id":"truncated"}`), reasonHead: "invalid_json:"},
+		{name: "deep", body: append(append([]byte(`{"data":[`), bytes.Repeat([]byte(`{"nested":`), maxJSONDepth+1)...), append([]byte("null"), append(bytes.Repeat([]byte("}"), maxJSONDepth+1), []byte("]}")...)...)...), reasonHead: "json_too_deep:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpClient := fakeHTTPClient{do: func(*http.Request, string) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(tt.body)), Header: make(http.Header)}, nil
+			}}
+			client, err := NewClient("http://pvmbg.test", "pvmbg.test-token", httpClient, testMapper(t))
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			failures := &fakeFailureSink{}
+			client.SetFailureSink(failures)
+			_, err = client.Fetch(context.Background(), nil)
+			if err == nil || len(failures.failures) != 1 || !strings.HasPrefix(failures.failures[0].Reason, tt.reasonHead) {
+				t.Fatalf("Fetch() error=%v failures=%+v, want %s", err, failures.failures, tt.reasonHead)
+			}
+		})
 	}
 }
 

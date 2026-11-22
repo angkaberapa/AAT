@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -11,7 +13,12 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-const unprocessedCollection = "unprocessed_messages"
+const (
+	unprocessedCollection              = "unprocessed_messages"
+	unprocessedPayloadChunksCollection = "unprocessed_payload_chunks"
+	maxInlineUnprocessedPayloadBytes = 8 << 20
+	unprocessedPayloadChunkSize      = 1 << 20
+)
 
 const (
 	UnprocessedRetrying = "retrying"
@@ -25,21 +32,32 @@ type SourcePosition struct {
 }
 
 type UnprocessedMessage struct {
-	MessageID      string         `json:"message_id" bson:"message_id"`
-	Source         string         `json:"source" bson:"source"`
-	SourceRefID    string         `json:"source_ref_id,omitempty" bson:"source_ref_id,omitempty"`
-	SourcePosition SourcePosition `json:"source_position,omitempty" bson:"source_position,omitempty"`
-	ReceivedAt     time.Time      `json:"received_at" bson:"received_at"`
-	Reason         string         `json:"reason" bson:"reason"`
-	Retryable      bool           `json:"retryable" bson:"retryable"`
-	Attempts       int            `json:"attempts" bson:"attempts"`
-	Status         string         `json:"status" bson:"status"`
-	RawPayload     []byte         `json:"-" bson:"raw_payload"`
-	ContentType    string         `json:"content_type,omitempty" bson:"content_type,omitempty"`
-	NextAttemptAt  *time.Time     `json:"next_attempt_at,omitempty" bson:"next_attempt_at,omitempty"`
-	LeaseOwner     string         `json:"-" bson:"lease_owner,omitempty"`
-	LeaseUntil     *time.Time     `json:"-" bson:"lease_until,omitempty"`
-	ResolvedAt     *time.Time     `json:"-" bson:"resolved_at,omitempty"`
+	MessageID         string         `json:"message_id" bson:"message_id"`
+	Source            string         `json:"source" bson:"source"`
+	SourceRefID       string         `json:"source_ref_id,omitempty" bson:"source_ref_id,omitempty"`
+	SourcePosition    SourcePosition `json:"source_position,omitempty" bson:"source_position,omitempty"`
+	ReceivedAt        time.Time      `json:"received_at" bson:"received_at"`
+	Reason            string         `json:"reason" bson:"reason"`
+	Retryable         bool           `json:"retryable" bson:"retryable"`
+	Attempts          int            `json:"attempts" bson:"attempts"`
+	Status            string         `json:"status" bson:"status"`
+	RawPayload        []byte         `json:"-" bson:"raw_payload,omitempty"`
+	RawPayloadChunked bool           `json:"-" bson:"raw_payload_chunked,omitempty"`
+	RawPayloadSize    int            `json:"-" bson:"raw_payload_size,omitempty"`
+	RawPayloadSHA256  string         `json:"-" bson:"raw_payload_sha256,omitempty"`
+	RawPayloadChunks  int            `json:"-" bson:"raw_payload_chunks,omitempty"`
+	ContentType       string         `json:"content_type,omitempty" bson:"content_type,omitempty"`
+	NextAttemptAt     *time.Time     `json:"next_attempt_at,omitempty" bson:"next_attempt_at,omitempty"`
+	LeaseOwner        string         `json:"-" bson:"lease_owner,omitempty"`
+	LeaseUntil        *time.Time     `json:"-" bson:"lease_until,omitempty"`
+	ResolvedAt        *time.Time     `json:"-" bson:"resolved_at,omitempty"`
+}
+
+type unprocessedPayloadChunk struct {
+	ID        string `bson:"_id"`
+	MessageID string `bson:"message_id"`
+	Index     int    `bson:"index"`
+	Data      []byte `bson:"data"`
 }
 
 type UnprocessedFilter struct {
@@ -67,6 +85,12 @@ func unprocessedIndexes() []mongo.IndexModel {
 	}
 }
 
+func unprocessedPayloadChunkIndexes() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{Keys: bson.D{{Key: "message_id", Value: 1}, {Key: "index", Value: 1}}, Options: options.Index().SetUnique(true)},
+	}
+}
+
 func (s *Store) StoreUnprocessed(ctx context.Context, message UnprocessedMessage) (bool, error) {
 	if message.MessageID == "" || message.Source == "" || message.Reason == "" || message.ReceivedAt.IsZero() {
 		return false, errors.New("unprocessed message_id, source, received_at, and reason are required")
@@ -75,13 +99,28 @@ func (s *Store) StoreUnprocessed(ctx context.Context, message UnprocessedMessage
 		return false, errors.New("unprocessed status and retryable are inconsistent")
 	}
 	message.ReceivedAt = message.ReceivedAt.UTC()
+	setOnInsert := bson.D{
+		{Key: "message_id", Value: message.MessageID}, {Key: "source", Value: message.Source},
+		{Key: "source_ref_id", Value: message.SourceRefID}, {Key: "source_position", Value: message.SourcePosition},
+		{Key: "received_at", Value: message.ReceivedAt}, {Key: "content_type", Value: message.ContentType},
+	}
+	if len(message.RawPayload) <= maxInlineUnprocessedPayloadBytes {
+		setOnInsert = append(setOnInsert, bson.E{Key: "raw_payload", Value: message.RawPayload})
+	} else {
+		chunks := splitUnprocessedPayload(message.MessageID, message.RawPayload)
+		if err := s.storeUnprocessedPayloadChunks(ctx, chunks); err != nil {
+			return false, fmt.Errorf("store unprocessed %s payload chunks: %w", message.MessageID, err)
+		}
+		digest := sha256.Sum256(message.RawPayload)
+		setOnInsert = append(setOnInsert,
+			bson.E{Key: "raw_payload_chunked", Value: true},
+			bson.E{Key: "raw_payload_size", Value: len(message.RawPayload)},
+			bson.E{Key: "raw_payload_sha256", Value: hex.EncodeToString(digest[:])},
+			bson.E{Key: "raw_payload_chunks", Value: len(chunks)},
+		)
+	}
 	update := bson.D{
-		{Key: "$setOnInsert", Value: bson.D{
-			{Key: "message_id", Value: message.MessageID}, {Key: "source", Value: message.Source},
-			{Key: "source_ref_id", Value: message.SourceRefID}, {Key: "source_position", Value: message.SourcePosition},
-			{Key: "received_at", Value: message.ReceivedAt}, {Key: "raw_payload", Value: message.RawPayload},
-			{Key: "content_type", Value: message.ContentType},
-		}},
+		{Key: "$setOnInsert", Value: setOnInsert},
 		{Key: "$set", Value: bson.D{
 			{Key: "reason", Value: message.Reason}, {Key: "retryable", Value: message.Retryable},
 			{Key: "status", Value: message.Status}, {Key: "next_attempt_at", Value: message.NextAttemptAt},
@@ -140,6 +179,9 @@ func (s *Store) GetUnprocessed(ctx context.Context, messageID string) (*Unproces
 	if err != nil {
 		return nil, fmt.Errorf("get unprocessed: %w", err)
 	}
+	if err := s.hydrateUnprocessedPayload(ctx, &message); err != nil {
+		return nil, fmt.Errorf("get unprocessed payload: %w", err)
+	}
 	return &message, nil
 }
 
@@ -165,7 +207,84 @@ func (s *Store) ClaimUnprocessed(ctx context.Context, source, owner string, leas
 	if err != nil {
 		return nil, fmt.Errorf("claim unprocessed: %w", err)
 	}
+	if err := s.hydrateUnprocessedPayload(ctx, &message); err != nil {
+		return nil, fmt.Errorf("claim unprocessed payload: %w", err)
+	}
 	return &message, nil
+}
+
+func splitUnprocessedPayload(messageID string, payload []byte) []unprocessedPayloadChunk {
+	chunks := make([]unprocessedPayloadChunk, 0, (len(payload)+unprocessedPayloadChunkSize-1)/unprocessedPayloadChunkSize)
+	for start, index := 0, 0; start < len(payload); start, index = start+unprocessedPayloadChunkSize, index+1 {
+		end := min(start+unprocessedPayloadChunkSize, len(payload))
+		chunks = append(chunks, unprocessedPayloadChunk{
+			ID: fmt.Sprintf("%s:%06d", messageID, index), MessageID: messageID, Index: index,
+			Data: append([]byte(nil), payload[start:end]...),
+		})
+	}
+	return chunks
+}
+
+func (s *Store) storeUnprocessedPayloadChunks(ctx context.Context, chunks []unprocessedPayloadChunk) error {
+	for _, chunk := range chunks {
+		_, err := s.unprocessedPayloadChunks.UpdateOne(ctx,
+			bson.D{{Key: "_id", Value: chunk.ID}},
+			bson.D{{Key: "$setOnInsert", Value: chunk}},
+			options.UpdateOne().SetUpsert(true),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) hydrateUnprocessedPayload(ctx context.Context, message *UnprocessedMessage) error {
+	if !message.RawPayloadChunked {
+		return nil
+	}
+	cur, err := s.unprocessedPayloadChunks.Find(ctx,
+		bson.D{{Key: "message_id", Value: message.MessageID}},
+		options.Find().SetSort(bson.D{{Key: "index", Value: 1}}),
+	)
+	if err != nil {
+		return err
+	}
+	defer cur.Close(ctx)
+	var chunks []unprocessedPayloadChunk
+	if err := cur.All(ctx, &chunks); err != nil {
+		return err
+	}
+	payload, err := assembleUnprocessedPayload(message, chunks)
+	if err != nil {
+		return err
+	}
+	message.RawPayload = payload
+	return nil
+}
+
+func assembleUnprocessedPayload(message *UnprocessedMessage, chunks []unprocessedPayloadChunk) ([]byte, error) {
+	if message.RawPayloadSize < 0 || message.RawPayloadChunks <= 0 || message.RawPayloadSHA256 == "" {
+		return nil, errors.New("invalid chunked payload metadata")
+	}
+	if len(chunks) != message.RawPayloadChunks {
+		return nil, fmt.Errorf("payload chunk count = %d, want %d", len(chunks), message.RawPayloadChunks)
+	}
+	payload := make([]byte, 0, message.RawPayloadSize)
+	for index, chunk := range chunks {
+		if chunk.MessageID != message.MessageID || chunk.Index != index {
+			return nil, fmt.Errorf("payload chunk %d is missing or out of order", index)
+		}
+		payload = append(payload, chunk.Data...)
+	}
+	if len(payload) != message.RawPayloadSize {
+		return nil, fmt.Errorf("payload size = %d, want %d", len(payload), message.RawPayloadSize)
+	}
+	digest := sha256.Sum256(payload)
+	if hex.EncodeToString(digest[:]) != message.RawPayloadSHA256 {
+		return nil, errors.New("payload SHA-256 mismatch")
+	}
+	return payload, nil
 }
 
 func (s *Store) ResolveUnprocessed(ctx context.Context, messageID, owner string) error {
