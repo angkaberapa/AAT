@@ -136,7 +136,11 @@ func (client *Client) Fetch(
 	if !utf8.Valid(body) {
 		return nil, client.parkResponse(ctx, body, "invalid_utf8: PVMBG response is not valid UTF-8")
 	}
-	if depth, ok := jsonDepth(body); !ok || depth > maxJSONDepth {
+	depth, structurallyComplete := jsonDepth(body)
+	if !structurallyComplete {
+		return nil, client.parkResponse(ctx, body, "invalid_json: incomplete or unbalanced JSON structure")
+	}
+	if depth > maxJSONDepth {
 		return nil, client.parkResponse(ctx, body, fmt.Sprintf("json_too_deep: depth exceeds %d", maxJSONDepth))
 	}
 	var envelope struct {

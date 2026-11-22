@@ -29,14 +29,15 @@ const (
 )
 
 type Store struct {
-	client       *mongo.Client
-	events       *mongo.Collection
-	leadership   *mongo.Collection // P2 M2: dokumen fence (epoch leader)
-	statuses     *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
-	unprocessed  *mongo.Collection // P3: raw messages that could not be processed
-	fieldReports *mongo.Collection // P3: durable Tim Lapangan inbox
-	mongoURI     string
-	database     string
+	client      *mongo.Client
+	events      *mongo.Collection
+	leadership  *mongo.Collection // P2 M2: dokumen fence (epoch leader)
+	statuses    *mongo.Collection // P2 M2: status poll per sumber, dibaca semua instance
+	unprocessed *mongo.Collection // P3: raw messages that could not be processed
+	unprocessedPayloadChunks *mongo.Collection
+	fieldReports             *mongo.Collection // P3: durable Tim Lapangan inbox
+	mongoURI                 string
+	database                 string
 }
 
 const serverSelectionTimeout = 3 * time.Second
@@ -77,20 +78,26 @@ func New(ctx context.Context, logger *slog.Logger, uri, database string) (*Store
 		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("create unprocessed indexes: %w", err)
 	}
+	unprocessedPayloadChunks := db.Collection(unprocessedPayloadChunksCollection)
+	if _, err := unprocessedPayloadChunks.Indexes().CreateMany(ctx, unprocessedPayloadChunkIndexes()); err != nil {
+		_ = client.Disconnect(ctx)
+		return nil, fmt.Errorf("create unprocessed payload chunk indexes: %w", err)
+	}
 	fieldReports := db.Collection(fieldReportsCollection)
 	if _, err := fieldReports.Indexes().CreateMany(ctx, fieldReportIndexes()); err != nil {
 		_ = client.Disconnect(ctx)
 		return nil, fmt.Errorf("create field report indexes: %w", err)
 	}
 	return &Store{
-		client:       client,
-		events:       events,
-		leadership:   db.Collection(leadershipCollection),
-		statuses:     db.Collection(sourceStatusCollect),
-		unprocessed:  unprocessed,
-		fieldReports: fieldReports,
-		mongoURI:     uri,
-		database:     database,
+		client:                   client,
+		events:                   events,
+		leadership:               db.Collection(leadershipCollection),
+		statuses:                 db.Collection(sourceStatusCollect),
+		unprocessed:              unprocessed,
+		unprocessedPayloadChunks: unprocessedPayloadChunks,
+		fieldReports:             fieldReports,
+		mongoURI:                 uri,
+		database:                 database,
 	}, nil
 }
 
