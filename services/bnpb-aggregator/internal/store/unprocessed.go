@@ -16,8 +16,8 @@ import (
 const (
 	unprocessedCollection              = "unprocessed_messages"
 	unprocessedPayloadChunksCollection = "unprocessed_payload_chunks"
-	maxInlineUnprocessedPayloadBytes = 8 << 20
-	unprocessedPayloadChunkSize      = 1 << 20
+	maxInlineUnprocessedPayloadBytes   = 8 << 20
+	unprocessedPayloadChunkSize        = 1 << 20
 )
 
 const (
@@ -209,6 +209,34 @@ func (s *Store) ClaimUnprocessed(ctx context.Context, source, owner string, leas
 	}
 	if err := s.hydrateUnprocessedPayload(ctx, &message); err != nil {
 		return nil, fmt.Errorf("claim unprocessed payload: %w", err)
+	}
+	return &message, nil
+}
+
+func (s *Store) ClaimUnprocessedByID(ctx context.Context, source, messageID, owner string, lease time.Duration, statuses ...string) (*UnprocessedMessage, error) {
+	now := time.Now().UTC()
+	query := bson.D{
+		{Key: "message_id", Value: messageID},
+		{Key: "source", Value: source},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: statuses}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "lease_until", Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "lease_until", Value: nil}},
+			bson.D{{Key: "lease_until", Value: bson.D{{Key: "$lte", Value: now}}}},
+		}},
+	}
+	update := bson.D{{Key: "$set", Value: bson.D{{Key: "lease_owner", Value: owner}, {Key: "lease_until", Value: now.Add(lease)}}}}
+	var message UnprocessedMessage
+	err := s.unprocessed.FindOneAndUpdate(ctx, query, update, options.FindOneAndUpdate().
+		SetReturnDocument(options.After)).Decode(&message)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim unprocessed %s: %w", messageID, err)
+	}
+	if err := s.hydrateUnprocessedPayload(ctx, &message); err != nil {
+		return nil, fmt.Errorf("claim unprocessed %s payload: %w", messageID, err)
 	}
 	return &message, nil
 }

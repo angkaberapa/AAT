@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 type replayStore interface {
 	ClaimUnprocessed(context.Context, string, string, time.Duration, ...string) (*store.UnprocessedMessage, error)
+	ClaimUnprocessedByID(context.Context, string, string, string, time.Duration, ...string) (*store.UnprocessedMessage, error)
 	ResolveUnprocessed(context.Context, string, string) error
 	ReleaseUnprocessed(context.Context, string, string, string) error
 	ImportBatch(context.Context, []domain.HazardEvent) (map[store.SaveResult]int, error)
@@ -31,6 +33,11 @@ func RegisterReplay(mux *http.ServeMux, logger *slog.Logger, destination replayS
 			return
 		}
 		limit := 100
+		messageID := strings.TrimSpace(r.URL.Query().Get("message_id"))
+		if len(messageID) > 256 {
+			writeProblem(w, http.StatusBadRequest, "bad_request", "message_id is too long")
+			return
+		}
 		if value := r.URL.Query().Get("limit"); value != "" {
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed < 1 || parsed > 1000 {
@@ -38,6 +45,9 @@ func RegisterReplay(mux *http.ServeMux, logger *slog.Logger, destination replayS
 				return
 			}
 			limit = parsed
+		}
+		if messageID != "" {
+			limit = 1
 		}
 		if !replayMu.TryLock() {
 			writeProblem(w, http.StatusConflict, "replay_in_progress", "a replay is already running on this instance")
@@ -47,12 +57,22 @@ func RegisterReplay(mux *http.ServeMux, logger *slog.Logger, destination replayS
 
 		recovered := 0
 		for recovered < limit {
-			message, err := destination.ClaimUnprocessed(r.Context(), string(domain.SourcePVMBG), owner, 30*time.Second, store.UnprocessedParked)
+			var message *store.UnprocessedMessage
+			var err error
+			if messageID != "" {
+				message, err = destination.ClaimUnprocessedByID(r.Context(), string(domain.SourcePVMBG), messageID, owner, 30*time.Second, store.UnprocessedParked)
+			} else {
+				message, err = destination.ClaimUnprocessed(r.Context(), string(domain.SourcePVMBG), owner, 30*time.Second, store.UnprocessedParked)
+			}
 			if err != nil {
 				writeProblem(w, http.StatusServiceUnavailable, "unavailable", err.Error())
 				return
 			}
 			if message == nil {
+				if messageID != "" {
+					writeProblem(w, http.StatusNotFound, "not_found", "message_id was not found in parked PVMBG messages")
+					return
+				}
 				break
 			}
 			report, err := pvmbg.DecodeReport(message.RawPayload, compatibilityVersion)
@@ -75,6 +95,10 @@ func RegisterReplay(mux *http.ServeMux, logger *slog.Logger, destination replayS
 			}
 			recovered++
 		}
-		core.WriteJSON(w, http.StatusOK, map[string]any{"source": domain.SourcePVMBG, "recovered": recovered, "limit": limit})
+		response := map[string]any{"source": domain.SourcePVMBG, "recovered": recovered, "limit": limit}
+		if messageID != "" {
+			response["message_id"] = messageID
+		}
+		core.WriteJSON(w, http.StatusOK, response)
 	})
 }
