@@ -18,7 +18,7 @@ REGISTRY="${REGISTRY:-ghcr.io/angkaberapa}"
 PREFIX="${PREFIX:-aat-}"
 OVERLAY="$ROOT/k8s/overlays/demo/kustomization.yaml"
 SERVICES=(bmkg-mock pvmbg-mock bnpb-aggregator bnpb-api bnpb-auth bnpb-consumer-dashboard
-  bnpb-consumer-notifier bnpb-coastal bnpb-satellite)
+  bnpb-consumer-notifier bnpb-ai-advisory bnpb-coastal bnpb-satellite)
 
 if [[ -z "${TAG:-}" ]]; then
   TAG="$(git -C "$ROOT" rev-parse --short HEAD)"

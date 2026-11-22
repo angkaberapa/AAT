@@ -103,3 +103,22 @@ data:
   KAFKA_HAZARD_TOPIC: hazard-events
   KAFKA_GROUP_ID: notifier
   PROCESSING_DELAY_MS: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bnpb-ai-advisory-config
+data:
+  LOG_LEVEL: INFO
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_HAZARD_TOPIC: hazard-events
+  KAFKA_GROUP_ID: ai-advisory
+  AI_ANOMALY_THRESHOLD: "3.5"
+  AI_MIN_SAMPLES: "20"
+  AI_COOLDOWN_SECONDS: "30"
+  AI_MAX_ADVISORIES: "200"
+  AI_SUMMARY_MAX_EVENTS: "20"
+  LLM_TIMEOUT_MS: "3000"
+  LLM_THINKING: "disabled"
+  LLM_BASE_URL: ""
+  LLM_MODEL: ""

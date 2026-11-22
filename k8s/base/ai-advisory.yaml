@@ -1,0 +1,45 @@
+# Bonus AI-native: advisory anomali. Consumer group sendiri, tanpa PVC dan tanpa
+# akses tulis ke Canonical Store. Mati/slow tidak memengaruhi ingest atau alert.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bnpb-ai-advisory
+  labels: { app: bnpb-ai-advisory, role: consumer }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bnpb-ai-advisory }
+  template:
+    metadata:
+      labels: { app: bnpb-ai-advisory, role: consumer }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: bnpb-ai-advisory
+          image: aat/bnpb-ai-advisory:dev
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom: [{ configMapRef: { name: bnpb-ai-advisory-config } }]
+          env:
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef: { name: bnpb-secrets, key: LLM_API_KEY, optional: true }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 64Mi, cpu: 25m }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bnpb-ai-advisory
+  labels: { app: bnpb-ai-advisory, role: consumer }
+spec:
+  type: LoadBalancer
+  selector: { app: bnpb-ai-advisory }
+  ports: [{ name: http, port: 8094, targetPort: http }]

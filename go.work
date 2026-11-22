@@ -2,6 +2,7 @@ go 1.26.0
 
 use (
 	./services/bnpb-aggregator
+	./services/bnpb-ai-advisory
 	./services/bnpb-api
 	./services/bnpb-auth
 	./services/bnpb-coastal

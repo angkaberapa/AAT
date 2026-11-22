@@ -16,7 +16,7 @@ flowchart LR
     SAT & COA -->|ingest internal| AGG
     AGG --> MONGO[(MongoDB sharded<br/>2 shard x 3 replika)]
     AGG -->|outbox| KAFKA[(Kafka)]
-    KAFKA --> DASH[consumer-dashboard] & NOTIF[consumer-notifier]
+    KAFKA --> DASH[consumer-dashboard] & NOTIF[consumer-notifier] & AI[ai-advisory]
     PROM[Prometheus] -.scrape.-> API & AGG
     API & AGG -.trace.-> JAEGER[Jaeger]
 ```
@@ -63,8 +63,9 @@ Lokal memakai `localhost`; cluster demo memakai IP node mana pun (ServiceLB k3s)
 |---:|---|---:|---|
 | 8080 | bnpb-api | 8091 | dashboard consumer + analitik (`/analytics`) |
 | 8090 | bnpb-auth | 8092 | notifier (`/notifications`) |
-| 8081 / 8082 | bmkg-mock / pvmbg-mock | 3000 | Grafana (dashboard metrik) |
-| 9090 | Prometheus | 16686 | Jaeger (trace) |
+| 8081 / 8082 | bmkg-mock / pvmbg-mock | 8094 | ai-advisory (`/advisories`, `/summary`) |
+| 3000 | Grafana (dashboard metrik) | 9090 | Prometheus |
+| 16686 | Jaeger (trace) | | |
 
 Service internal (aggregator, satellite, coastal, Mongo, Kafka) tidak dibuka; akses dengan
 `kubectl -n sistem-informasi-kebencanaan-bnpb port-forward svc/bnpb-aggregator 8000:8000`.
@@ -163,6 +164,27 @@ kubectl logs -n tester-agent daemonset/tester-agent -f
 - Prioritas beban: `K6_NETWORK=k3d-bnpb loadtest/run.sh p5-priority.js -e API_URL=http://k3d-bnpb-server-0:8080 -e AUTH_URL=http://k3d-bnpb-server-0:8090` (demo: `K6_NETWORK=host`, IP node). Media mendapat 429, Tim Lapangan tetap 200.
 - Peringatan kritis & SLO: `curl localhost:8092/notifications`, Grafana baris "SLO jalur peringatan".
 - Kesehatan sensor: `meta.sources.SENSOR_PANTAI` dan panel "Circuit breaker".
+
+### Bonus AI-native — advisory anomali
+- Service `bnpb-ai-advisory` membaca topic `hazard-events` dengan consumer group sendiri
+  (`ai-advisory`) dan membuka `GET /advisories` serta `GET /summary`.
+- Model: Gaussian online per `(source, hazard_type, area)`. Yang dipelajari adalah laju event dan
+  severity; skor di atas `AI_ANOMALY_THRESHOLD` menghasilkan advisory.
+- `GET /summary` memanggil LLM OpenAI-compatible kalau `LLM_BASE_URL`, `LLM_MODEL`, dan
+  `LLM_API_KEY` diisi. Timeout `LLM_TIMEOUT_MS` (default 3000). Kalau LLM mati, lambat, atau belum
+  dikonfigurasi, endpoint tetap 200 dengan `source: "fallback"` dan ringkasan template.
+- Contoh DeepSeek: `LLM_BASE_URL=https://api.deepseek.com`, `LLM_MODEL=deepseek-flash`,
+  `LLM_THINKING=disabled` (thinking dimatikan supaya ringkasan tetap cepat).
+- Isolasi: service ini tidak menulis ke Canonical Store, tidak memanggil producer, dan tidak
+  mengubah `HazardEvent`. Matikan pod-nya dan ingest/alert tetap berjalan.
+- Demo cepat:
+  ```bash
+  docker compose up -d --build bnpb-ai-advisory
+  curl -s localhost:8094/advisories | python3 -m json.tool
+  # kirim burst event ke Kafka, lalu lihat advisory baru
+  bash scripts/ai-advisory-demo.sh
+  ```
+- Metrik: `ai_advisory_events_total`, `ai_advisory_generated_total`, `ai_advisory_score`.
 
 ### Pengujian fungsi M1 (masih berlaku)
 Keputusan M1 terbawa ke M2. Langkah uji M1 (setup Postman, scope Media vs Tim Lapangan, refresh

@@ -12,6 +12,7 @@ resources:
   - aggregator.yaml
   - api.yaml
   - consumers.yaml
+  - ai-advisory.yaml
   - observability.yaml
 
 # Dashboard Grafana disimpan sebagai file JSON biasa supaya mudah diedit/diekspor ulang.

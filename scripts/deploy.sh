@@ -47,6 +47,13 @@ if ((${#missing[@]})); then
   exit 1
 fi
 
+# LLM_API_KEY opsional: tanpa key, /summary memakai fallback.
+llm_line="$(grep -E '^LLM_API_KEY=' "$ENV_FILE" | tail -n1 || true)"
+llm_value="${llm_line#*=}"
+if [[ -n "$llm_line" && -n "$llm_value" ]]; then
+  secret_args+=("--from-literal=LLM_API_KEY=${llm_value}")
+fi
+
 echo "deploy overlay '$OVERLAY' ke context: $(kubectl config current-context)"
 kubectl apply -f "$ROOT/k8s/base/namespace.yaml"
 kubectl -n "$NS" create secret generic bnpb-secrets "${secret_args[@]}" \

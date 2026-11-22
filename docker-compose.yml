@@ -152,6 +152,32 @@ services:
       kafka: { condition: service_healthy }
     networks: [backend]
 
+  # Bonus AI-native: advisory anomali, consumer group sendiri, bukan jalur peringatan.
+  bnpb-ai-advisory:
+    <<: *service-defaults
+    build: ./services/bnpb-ai-advisory
+    environment:
+      <<: *common-env
+      SERVICE_NAME: bnpb-ai-advisory
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_HAZARD_TOPIC: ${KAFKA_HAZARD_TOPIC:-hazard-events}
+      KAFKA_GROUP_ID: ai-advisory
+      AI_ANOMALY_THRESHOLD: ${AI_ANOMALY_THRESHOLD:-3.5}
+      AI_MIN_SAMPLES: ${AI_MIN_SAMPLES:-20}
+      AI_COOLDOWN_SECONDS: ${AI_COOLDOWN_SECONDS:-30}
+      AI_MAX_ADVISORIES: ${AI_MAX_ADVISORIES:-200}
+      AI_SUMMARY_MAX_EVENTS: ${AI_SUMMARY_MAX_EVENTS:-20}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_THINKING: ${LLM_THINKING:-}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-3000}
+    ports:
+      - "${AI_ADVISORY_PORT:-8094}:8000"
+    depends_on:
+      kafka: { condition: service_healthy }
+    networks: [backend]
+
   # Consumer ketiga (P5): langganan topic yang sama dengan group baru, tanpa mengubah kode
   # producer. Hanya jalan kalau diminta: docker compose --profile pemda up -d bnpb-consumer-pemda
   bnpb-consumer-pemda:
