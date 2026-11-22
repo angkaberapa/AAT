@@ -54,7 +54,7 @@ spec:
               valueFrom: { secretKeyRef: { name: bnpb-secrets, key: MONGO_ROOT_PASSWORD } }
             # $(VAR) diekspansi kubelet dari env di atas (MONGO_HOST dari ConfigMap via envFrom).
             - name: MONGO_URI
-              value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@$(MONGO_HOST)/?authSource=admin&directConnection=true
+              value: mongodb://$(MONGO_ROOT_USER):$(MONGO_ROOT_PASSWORD)@$(MONGO_HOST)/?authSource=admin
           lifecycle:
             # Beri waktu Service/kube-proxy mencabut pod ini dari endpoint sebelum SIGTERM, supaya
             # tidak ada request baru yang jatuh ke pod yang sedang berhenti (rolling update).
@@ -64,6 +64,10 @@ spec:
             httpGet: { path: /health, port: http }
             periodSeconds: 3
             failureThreshold: 2
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 3
+            failureThreshold: 120
           livenessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 10
