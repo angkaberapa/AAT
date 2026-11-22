@@ -15,6 +15,9 @@ type FileState struct{ path string }
 
 func NewFileState(path string) FileState { return FileState{path: path} }
 
+// Path = lokasi file state ("" = hanya di memori). Dipakai loader streaming dashboard.
+func (s FileState) Path() string { return s.path }
+
 // Load fills v from the file; a missing file leaves v untouched.
 func (s FileState) Load(v any) error {
 	if s.path == "" {
