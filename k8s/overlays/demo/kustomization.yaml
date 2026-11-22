@@ -56,29 +56,29 @@ patches:
 images:
   - name: aat/bmkg-mock
     newName: ghcr.io/angkaberapa/aat-bmkg-mock
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/pvmbg-mock
     newName: ghcr.io/angkaberapa/aat-pvmbg-mock
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-aggregator
     newName: ghcr.io/angkaberapa/aat-bnpb-aggregator
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-api
     newName: ghcr.io/angkaberapa/aat-bnpb-api
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-auth
     newName: ghcr.io/angkaberapa/aat-bnpb-auth
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-consumer-dashboard
     newName: ghcr.io/angkaberapa/aat-bnpb-consumer-dashboard
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-consumer-notifier
     newName: ghcr.io/angkaberapa/aat-bnpb-consumer-notifier
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-coastal
     newName: ghcr.io/angkaberapa/aat-bnpb-coastal
-    newTag: "5a5d731"
+    newTag: "5fad98c"
   - name: aat/bnpb-satellite
     newName: ghcr.io/angkaberapa/aat-bnpb-satellite
-    newTag: "5a5d731"
+    newTag: "5fad98c"
 # <<< images
